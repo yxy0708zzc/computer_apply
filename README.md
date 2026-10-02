@@ -19,16 +19,49 @@ app\
   llm.py       OpenAI 兼容流式客户端（reasoning_content 思考链 / 工具调用聚合 / 反爬兼容）
   prompts.py   旅行规划师系统提示词（信息收集策略 / 工具纪律 / 正式输出契约）
   tools.py     5 个 Agent 工具（结果双路输出：给 AI 的摘要 + 给详情页的全量数据）
-  planner.py   本地方案引擎（移植 travel2 出题算法找解内核：直达/换乘/补票变体）
+  planner.py   本地方案引擎（移植 travel2 出题算法的找解内核：直达/换乘链式/补票变体 + 评分）
   online.py    12306 联网层（railway 反爬体系：全局串行会话/UA轮换/退避重试 + 票价接口）
   database.py  本地数据只读查询（railway.db 车站/车次/经停 + prices.db 历史参考价）
+collect\      数据采集包（借鉴 railway / travel2 采集逻辑，入库 tripai schema）
+  stations.py       采集全国车站表（station_name.js → 电报码/站名）
+  collector.py      车次发现（search API 前缀法，K G C T Z D + 数字）+ 经停采集（queryByTrainNo，
+                    候选日期 +0/+1/+2/+3/+9/+13 兜底非每日车）+ station_trains 重建
+  price_collector.py 票价爬取（queryAllPublicPrice，参考 travel2 price_collector：相邻站对爬取 +
+                    非相邻段离线累加推算 + 逐日轮换 + 断点续爬 --resume / 强制重爬 --force）
+  cleanup.py        票价数据清理：数据不全（站对数 < C(经停,2)）的车次全量删库 → --resume 重爬补全
+                    （--check 只读体检 / --all 全量清空慎用）
+  database.py       建表/连接（schema 与 app 一致）
 data\
-  railway.db   本地列车静态数据（约 3400 站 / 4764 车次，复制自 travel2）
-  prices.db    历史票价参考（仅排序估算，实时票价走联网）
+  railway.db   本地列车静态数据（车站/车次/经停；可由 collect 包重新采集刷新）
+  prices.db    历史票价参考（仅 cheapest 排序估算，实时票价走联网）
 static\        前端（人大红学术风，marked+DOMPurify，SSE）
 sessions\      会话落盘（JSON，含完整 agent 轨迹与方案数据）
 logs\          12306 爬取日志（JSONL，反爬排查）
+docs\
+  12306数据规格.md  ★ 12306 各接口返回数据规格、解析规则、入库映射与已知坑（实测核验）
 ```
+
+## 数据采集（collect 包）
+
+```bash
+cd C:\vscode_py\tripai
+.venv\Scripts\python.exe -m collect.stations                       # 1. 车站表（3404 站）
+.venv\Scripts\python.exe -m collect.collector                      # 2. 全字头 K G C T Z D + 数字车次
+.venv\Scripts\python.exe -m collect.collector --letters G D K      # 指定字头
+.venv\Scripts\python.exe -m collect.collector --limit 20           # 小规模实测
+.venv\Scripts\python.exe -m collect.price_collector --train G1     # 3. 票价：单趟
+.venv\Scripts\python.exe -m collect.price_collector --resume       #    票价：全量断点续爬
+.venv\Scripts\python.exe -m collect.cleanup                        # 4. 清理数据不全车次（删后 --resume 重爬）
+.venv\Scripts\python.exe -m collect.cleanup --check                #    只读体检
+.venv\Scripts\python.exe -m collect.price_collector --stats        # 查看库规模
+```
+
+- 借鉴 railway 的采集实现：search API 两位前缀发现（达 200 上限自动扩三位子前缀）、queryByTrainNo 经停、限速/指数退避/会话重建、10 线程并发经停采集
+- 票价爬取借鉴 travel2 price_collector：**相邻站对爬取 + 非相邻段离线累加推算**（任意区间都有参考价，供 cheapest 排序）、候选日期逐日轮换、断点续爬（站对完整性校验）、`--force` 强制重爬
+- 入库即 tripai schema（`stop_time`=发车时刻，普速取 `start_time`/高速取 `depart_time`；票价席别为**实际席别名**），app 查询层零改动
+- 同一 train_no 的改号码只保留一码（schema 约束），冲突计数打印
+- 断点续爬：已有经停的车次自动跳过；完成后自动重建 `station_trains` 物化视图
+- 已知限制：12306 对市内超短段（如 广州→广州白云）不发售票价，该段跳过、依赖该段的非相邻推算自动回避
 
 ## Agent 工作流
 

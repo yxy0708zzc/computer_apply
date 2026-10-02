@@ -20,14 +20,27 @@ RAILWAY_DB = os.path.join(_BASE_DIR, "data", "railway.db")
 PRICES_DB = os.path.join(_BASE_DIR, "data", "prices.db")
 SESSIONS_DIR = os.path.join(_BASE_DIR, "sessions")
 
-# 席别体系：全面采用 12306 实际席别名（class0/1/2 仅作 prices.db 历史库内部键）
+# 席别体系：全面采用 12306 余票页事实席别名（每列可能多名共用一个数值，可能为空）
 TICKET_TABLES = ["class0", "class1", "class2"]
-SEAT_CN_LIST = ["二等座", "一等座", "商务座", "硬卧", "软卧", "硬座", "软座", "高级软卧", "动卧", "无座"]
-# 实际席别 → prices.db 内部存储档位（仅历史参考价查询用，不对外暴露）
+SEAT_CN_LIST = [
+    "商务座", "特等座", "优选一等座", "一等座", "二等座", "二等包座",
+    "高级软卧", "软卧", "一等卧", "动卧", "硬卧", "二等卧",
+    "软座", "硬座", "无座",
+]
+# 成员名/组合名 → 主组合名（同值组归一：任一成员查同列数值）
+SEAT_CANONICAL = {
+    "商务座": "商务座/特等座", "特等座": "商务座/特等座", "商务座/特等座": "商务座/特等座",
+    "二等座": "二等座/二等包座", "二等包座": "二等座/二等包座", "二等座/二等包座": "二等座/二等包座",
+    "软卧": "软卧/一等卧", "一等卧": "软卧/一等卧", "软卧/一等卧": "软卧/一等卧",
+    "硬卧": "硬卧/二等卧", "二等卧": "硬卧/二等卧", "硬卧/二等卧": "硬卧/二等卧",
+    "优选一等座": "优选一等座", "高级软卧": "高级软卧", "动卧": "动卧",
+    "软座": "软座", "硬座": "硬座", "无座": "无座",
+}
+# 实际席别名 → prices.db 内部存储档位（仅历史参考价查询用，不对外暴露）
 SEAT_CN_TO_CLASS = {
-    "二等座": "class2", "硬座": "class2", "无座": "class2",
-    "一等座": "class1", "软座": "class1", "硬卧": "class1", "动卧": "class1",
-    "商务座": "class0", "高级软卧": "class0", "软卧": "class0",
+    "二等座/二等包座": "class2", "硬座": "class2", "无座": "class2",
+    "一等座": "class1", "软座": "class1", "硬卧/二等卧": "class1", "动卧": "class1",
+    "商务座/特等座": "class0", "高级软卧": "class0", "软卧/一等卧": "class0",
 }
 
 
@@ -156,17 +169,27 @@ def get_station_trains(conn: sqlite3.Connection, station_id: str) -> Optional[Di
 
 def get_price_estimate(from_id: str, to_id: str, seat_cn: str) -> Optional[float]:
     """该区间实际席别的历史参考价（取最低价；无数据返回 None）。
-    seat_cn 为 12306 实际席别名，内部转 prices.db 存储档位查询。"""
+    seat_cn 为 12306 席别名（成员名或组合名均可，自动归一）。prices 表三种存储并存：
+    新组合名（collect.price_collector）/ 旧单名（早期版本）/ 旧 class 键（travel2），全兼容。"""
     if not os.path.exists(PRICES_DB):
         return None
-    seat = SEAT_CN_TO_CLASS.get((seat_cn or "").strip())
-    if not seat:
+    cn = (seat_cn or "").strip()
+    canonical = SEAT_CANONICAL.get(cn, cn)
+    seat_old = SEAT_CN_TO_CLASS.get(canonical)
+    if not canonical and not seat_old:
         return None
+    names = [canonical]
+    for member, c in SEAT_CANONICAL.items():
+        if c == canonical and "/" not in member:
+            names.append(member)                     # 同组单成员名（早期单名存储）
+    if seat_old:
+        names.append(seat_old)
     conn = get_prices_conn()
     try:
+        ph = ",".join("?" * len(names))
         row = conn.execute(
-            "SELECT MIN(price) FROM prices WHERE from_station_id = ? AND to_station_id = ? "
-            "AND seat = ?", (from_id, to_id, seat)).fetchone()
+            f"SELECT MIN(price) FROM prices WHERE from_station_id = ? AND to_station_id = ? "
+            f"AND seat IN ({ph})", [from_id, to_id] + names).fetchone()
         return row[0] if row and row[0] else None
     except sqlite3.Error:
         return None

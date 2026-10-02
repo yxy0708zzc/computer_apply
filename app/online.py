@@ -75,12 +75,51 @@ ANTICRAWL_KEYWORDS = (
     "访问被拒绝", "Access Denied", "Too Many Requests", "触发风控",
 )
 
-# queryZ 席别字段位 → 中文名（railway 原版口径，全部实际席别）
+# queryZ 席别字段位 → 页面事实席别名（12306 余票页每列可能多名共用一个数值，可能为空）
+# 实测字段位：f[20]=优选一等座（智能动车组，G3 有值）、f[32]/31/30、f[21]/23/33、f[28]/24/29/26
 SEAT_FIELDS = [
-    (32, "商务座"), (31, "一等座"), (30, "二等座"),
-    (21, "高级软卧"), (23, "软卧"), (33, "动卧"),
-    (28, "硬卧"), (24, "软座"), (29, "硬座"), (26, "无座"),
+    (32, "商务座/特等座"), (20, "优选一等座"), (31, "一等座"),
+    (30, "二等座/二等包座"),
+    (21, "高级软卧"), (23, "软卧/一等卧"), (33, "动卧"),
+    (28, "硬卧/二等卧"), (24, "软座"), (29, "硬座"), (26, "无座"),
 ]
+# 同值组：组名 → 组内成员名（任一成员均可命中该列的数值）
+SEAT_GROUPS = {
+    "商务座/特等座": ("商务座", "特等座", "商务座/特等座"),
+    "优选一等座": ("优选一等座",),
+    "一等座": ("一等座",),
+    "二等座/二等包座": ("二等座", "二等包座", "二等座/二等包座"),
+    "高级软卧": ("高级软卧",),
+    "软卧/一等卧": ("软卧", "一等卧", "软卧/一等卧"),
+    "动卧": ("动卧",),
+    "硬卧/二等卧": ("硬卧", "二等卧", "硬卧/二等卧"),
+    "软座": ("软座",),
+    "硬座": ("硬座",),
+    "无座": ("无座",),
+}
+# 票价存储/查询用主名（成员名 → 组名主词）
+SEAT_CANONICAL = {
+    "特等座": "商务座/特等座", "商务座": "商务座/特等座",
+    "二等包座": "二等座/二等包座", "二等座": "二等座/二等包座",
+    "一等卧": "软卧/一等卧", "软卧": "软卧/一等卧",
+    "二等卧": "硬卧/二等卧", "硬卧": "硬卧/二等卧",
+    "优选一等座": "优选一等座", "高级软卧": "高级软卧", "动卧": "动卧",
+    "软座": "软座", "硬座": "硬座", "无座": "无座",
+}
+
+
+def _match_seat(seats: Dict[str, str], seat_type: str):
+    """同值组席别匹配：指定席别名 → all_seats 中的事实键与数值。
+    例：指定"特等座"可命中键"商务座/特等座"。返回 (实际键, 值) 或 (None, None)。"""
+    if seat_type in seats:
+        return seat_type, seats[seat_type]
+    for key, val in seats.items():
+        if seat_type in SEAT_GROUPS.get(key, (key,)):
+            return key, val
+    for key, val in seats.items():          # 反向：指定名是某键的主成员
+        if key in SEAT_GROUPS.get(seat_type, ()):            # noqa
+            return key, val
+    return None, None
 # 票价接口字段 → 实际席别名（按车型取对应组）
 PRICE_FIELDS_GD = (("ze_price", "二等座"), ("zy_price", "一等座"), ("swz_price", "商务座"))
 PRICE_FIELDS_PUSU = (("yz_price", "硬座"), ("yw_price", "硬卧"), ("rw_price", "软卧"))
@@ -438,10 +477,9 @@ def check_solutions(solutions: List[Dict], date: str, seat_type: str = "class2",
                 notes.append(f"{seg['train_num']} 未查到")
                 continue
             seats = t.get("seats", {})
-            seg["all_seats"] = seats   # 该车全部实际席位（数据面板完整展示）
-            # 主判定席别：严格按指定实际席别名（不做跨档静默替换，按实际展示）
-            raw = seats.get(seat_type)
-            used_cn = seat_type if raw not in (None, "", "--") else None
+            seg["all_seats"] = seats   # 该车全部实际席位（同值组名，可能为空=该车无此席）
+            # 主判定席别：同值组匹配（指定"特等座"可命中"商务座/特等座"列）
+            used_cn, raw = _match_seat(seats, seat_type)
             seg["seat_cn"] = used_cn
             if raw is None:
                 seg["ticket_status"] = "no_seat" if seats else "unknown"
@@ -469,9 +507,9 @@ def check_solutions(solutions: List[Dict], date: str, seat_type: str = "class2",
                 except ValueError:
                     seg["tickets"] = None
                     seg["ticket_status"] = "unknown"
-            # 票价：显示码匹配（票价接口无 train_no，无法别名匹配），按实际席别名取
+            # 票价：显示码匹配；席别归一到存储主名（如"特等座"→"商务座/特等座"）
             p = prices.get(t["code"])
-            seg["price"] = p.get(seat_type) if p else None
+            seg["price"] = p.get(SEAT_CANONICAL.get(seat_type, seat_type)) if p else None
 
         s["checked"] = True
         s["check_date"] = date
