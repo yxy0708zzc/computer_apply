@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# 虚拟环境
+.venv/
+
+# 运行产物（sessions 会话与 logs 日志不上传；data 数据库按需纳入版本控制）
+sessions/
+*.log
+
+# 密钥配置
+.env
+
+# IDE
+.vscode/
+.idea/

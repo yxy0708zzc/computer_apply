@@ -1,0 +1,205 @@
+﻿<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>铁程 · 智能火车出行规划</title>
+<link rel="stylesheet" href="/styles.css?v=7">
+<script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/dompurify@3.1.6/dist/purify.min.js"></script>
+</head>
+<body>
+
+<!-- ═══════════ 配置门页 ═══════════ -->
+<div id="gate" class="gate hidden">
+  <div class="gate-card">
+    <div class="gate-seal">
+      <svg viewBox="0 0 120 120" class="seal-svg" aria-hidden="true">
+        <circle cx="60" cy="60" r="56" fill="#9c1b1c"/>
+        <circle cx="60" cy="60" r="47" fill="none" stroke="#b9a263" stroke-width="3"/>
+        <text x="60" y="52" text-anchor="middle" font-size="30" fill="#fbf8f0" font-family="Georgia,'Songti SC',serif" font-weight="bold">铁程</text>
+        <text x="60" y="82" text-anchor="middle" font-size="13" fill="#b9a263" font-family="Georgia,'Songti SC',serif" letter-spacing="4">TRIP·AI</text>
+      </svg>
+    </div>
+    <h1 class="gate-title">铁程 · 智能火车出行规划</h1>
+    <p class="gate-sub">对话式规划 · 本地线路智能枚举 · 12306 实时余票核实</p>
+    <div class="gate-form">
+      <label>API-KEY <input id="gate-key" type="password" placeholder="sk-... / nvapi-..." autocomplete="off"></label>
+      <label>模型名称 <input id="gate-model" type="text" placeholder="OpenAI 兼容接口" autocomplete="off"></label>
+      <label>接口地址 <input id="gate-base" type="text" placeholder="OpenAI 兼容接口，如 https://.../v1" autocomplete="off"></label>
+      <div id="gate-err" class="alert err hidden"></div>
+      <button id="gate-btn" class="btn primary block">验证并进入</button>
+      <p class="gate-hint">配置保存在本机 .env，可随时在设置中修改</p>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════ 主界面 ═══════════ -->
+<div id="main" class="app hidden">
+  <header class="mast">
+    <div class="mast-inner">
+      <div class="mast-left">
+        <svg viewBox="0 0 120 120" class="mast-seal" id="mast-home" aria-hidden="true">
+          <circle cx="60" cy="60" r="56" fill="#9c1b1c"/>
+          <circle cx="60" cy="60" r="47" fill="none" stroke="#b9a263" stroke-width="3"/>
+          <text x="60" y="52" text-anchor="middle" font-size="30" fill="#fbf8f0" font-family="Georgia,'Songti SC',serif" font-weight="bold">铁程</text>
+          <text x="60" y="82" text-anchor="middle" font-size="13" fill="#b9a263" font-family="Georgia,'Songti SC',serif" letter-spacing="4">TRIP·AI</text>
+        </svg>
+        <div>
+          <div class="mast-title">铁程 · 智能火车出行规划</div>
+          <div class="mast-tag">对话式规划 · 本地枚举 · 实时余票</div>
+        </div>
+      </div>
+      <div class="mast-right">
+        <span id="model-badge" class="model-badge" title="当前模型">未配置</span>
+        <button id="btn-home" class="btn mast-btn">主页</button>
+        <button id="btn-detail" class="btn mast-btn hidden">对话详情<span id="detail-count" class="count hidden"></span></button>
+        <button id="btn-settings" class="btn mast-btn">设置</button>
+      </div>
+    </div>
+  </header>
+
+  <!-- 视图：模式选择 -->
+  <div id="mode-view" class="view">
+    <div class="mode-wrap">
+      <div class="mode-card" id="card-ai">
+        <div class="mode-icon">AI</div>
+        <div class="mode-name">AI 对话模式</div>
+        <div class="mode-desc">自然语言描述需求，AI 连续调用本地引擎与 12306 联网核实，给出正式规划报告</div>
+        <div class="mode-foot">适合：需求模糊 / 多轮调整 / 要推荐理由</div>
+      </div>
+      <div class="mode-card" id="card-manual">
+        <div class="mode-icon manual">手动</div>
+        <div class="mode-name">手动查票模式</div>
+        <div class="mode-desc">表单直填出发、到达、日期、坐席、时间范围、换乘次数，直连查票引擎，全程不经 AI</div>
+        <div class="mode-foot">适合：需求明确 / 精确筛选 / 快速直查</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 视图：AI 对话 -->
+  <div id="chat-view" class="view hidden">
+    <div class="layout">
+      <aside class="sidebar">
+        <button id="btn-new-session" class="btn primary block">新对话</button>
+        <div id="session-list" class="session-list"></div>
+        <div class="sidebar-foot">右键会话可重命名 / 删除</div>
+      </aside>
+      <main class="chat-col">
+        <div id="chat" class="chat"></div>
+        <div class="composer">
+          <div id="status-line" class="status-line hidden"></div>
+          <div class="composer-row">
+            <textarea id="input" rows="1" placeholder="描述您的出行需求，如：下周六 3 个人从北京去上海，尽量上午出发，二等座"></textarea>
+            <button id="btn-stop" class="btn danger hidden">停止</button>
+            <button id="btn-send" class="btn primary">发送</button>
+          </div>
+        </div>
+      </main>
+    </div>
+  </div>
+
+  <!-- 视图：对话详情（行式平铺） -->
+  <div id="detail-view" class="view hidden">
+    <div class="detail-bar">
+      <button id="btn-back" class="btn mast-btn dark">← 返回对话</button>
+      <span class="detail-title">对话详情 · 查询结果全量数据</span>
+      <span id="detail-meta" class="detail-meta"></span>
+    </div>
+    <div class="batch-bar">
+      <span>前</span><input id="batch-n-detail" type="number" value="5" min="1" max="60">
+      <span>条查余票</span>
+      <button id="batch-check-detail" class="btn primary small">批量核实</button>
+      <span id="batch-status-detail" class="checking hidden"><span class="spin"></span> 正在联网核实（区间合并查询，约 10~60 秒）…</span>
+      <span id="batch-result-detail" class="batch-result"></span>
+    </div>
+    <div id="detail-body" class="detail-body"></div>
+  </div>
+
+  <!-- 视图：手动查票 -->
+  <div id="manual-view" class="view hidden">
+    <div class="manual-wrap">
+      <aside class="manual-form">
+        <div class="manual-head">手动查票 · 直连引擎</div>
+        <label>出发站 <input id="mf-from" type="text" placeholder="站名或电报码，如 北京南"></label>
+        <label>到达站 <input id="mf-to" type="text" placeholder="站名或电报码，如 上海虹桥"></label>
+        <label>出行日期（必填）<input id="mf-date" type="date"></label>
+        <label>坐席
+          <select id="mf-seat"></select>
+        </label>
+        <label>换乘次数
+          <select id="mf-transfers">
+            <option value="0">直达</option>
+            <option value="1" selected>最多 1 次</option>
+            <option value="2">最多 2 次</option>
+          </select>
+        </label>
+        <div class="field-pair">
+          <label>出发时间从 <input id="mf-dep-after" type="time" value="00:00"></label>
+          <label>到 <input id="mf-dep-before" type="time" value="23:59"></label>
+        </div>
+        <div class="field-pair">
+          <label>到达时间从 <input id="mf-arr-after" type="time" value="00:00"></label>
+          <label>到 <input id="mf-arr-before" type="time" value="23:59"></label>
+        </div>
+        <label>排序
+          <select id="mf-sort">
+            <option value="comprehensive">综合评分</option>
+            <option value="fastest">历时最短</option>
+            <option value="cheapest">价格最低</option>
+            <option value="earliest">最早出发</option>
+            <option value="depart_latest">最晚出发</option>
+            <option value="arrive_earliest">最早到达</option>
+          </select>
+        </label>
+        <label>返回数量 <input id="mf-max" type="number" value="20" min="1" max="60"></label>
+        <div id="mf-err" class="alert err hidden"></div>
+        <button id="mf-search" class="btn primary block">查询方案</button>
+        <div class="manual-tip">查询为本地静态数据；点各行「联网核实」获取 12306 实时余票与票价</div>
+      </aside>
+      <main class="manual-result">
+        <div id="mr-meta" class="mr-meta hidden"></div>
+        <div class="batch-bar">
+          <span>前</span><input id="batch-n-manual" type="number" value="5" min="1" max="60">
+          <span>条查余票</span>
+          <button id="batch-check-manual" class="btn primary small">批量核实</button>
+          <span id="batch-status-manual" class="checking hidden"><span class="spin"></span> 正在联网核实（区间合并查询，约 10~60 秒）…</span>
+          <span id="batch-result-manual" class="batch-result"></span>
+        </div>
+        <div id="mr-body" class="mr-body">
+          <div class="detail-empty">填写左侧条件后查询。<br>结果按评分排序，逐行平铺；每行可单独联网核实余票票价。</div>
+        </div>
+      </main>
+    </div>
+  </div>
+</div>
+
+<!-- 右键菜单 -->
+<div id="ctx-menu" class="ctx-menu hidden">
+  <div class="ctx-item" data-act="rename">重命名</div>
+  <div class="ctx-item danger" data-act="delete">删除</div>
+</div>
+
+<!-- ═══════════ 设置弹窗 ═══════════ -->
+<div id="modal-settings" class="modal-mask hidden">
+  <div class="modal">
+    <div class="modal-head"><span>设置</span><button class="modal-close" id="btn-settings-close">✕</button></div>
+    <div class="modal-body">
+      <label>API-KEY <input id="set-key" type="password" autocomplete="off"></label>
+      <label>模型名称 <input id="set-model" type="text" autocomplete="off"></label>
+      <label>接口地址 <input id="set-base" type="text" autocomplete="off" placeholder="OpenAI 兼容接口"></label>
+      <div id="set-err" class="alert err hidden"></div>
+    </div>
+    <div class="modal-foot">
+      <button id="btn-set-save" class="btn primary">保存</button>
+      <button id="btn-set-verify" class="btn">保存并验证</button>
+    </div>
+  </div>
+</div>
+
+<div id="toast" class="toast hidden"></div>
+
+<script src="/api.js?v=7"></script>
+<script src="/app.js?v=7"></script>
+</body>
+</html>
