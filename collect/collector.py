@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """
 collect/collector.py —— 12306 车次发现 + 经停采集（借鉴 railway/collector.py）
 
@@ -46,13 +46,11 @@ CONFIG = {
     # 今天/明天命中率最高（当前运行图有效），再加 +3/+9/+13 覆盖非每日车。
     "query_dates": [(datetime.now() + timedelta(days=d)).strftime("%Y-%m-%d")
                     for d in (0, 1, 2, 3, 9, 13)],
-    "min_interval": (0.05, 0.15),    # 每次请求随机抖动延时范围（秒），顺利时短间隔
+    "min_interval": 0.15,            # 请求最小间隔（秒），travel2 同款（固定值）
     "request_timeout": 15,
     "max_retries": 10,
     "search_retries": 10,
-    "retry_sleep": (0.5, 1.5),
-    "block_base": 3,                 # 限流退避基数（秒），指数增长（原 6 减半）
-    "block_cap": 30,                 # 限流退避上限（秒）（原 60 减半）
+    "retry_sleep": (0.5, 1.5),       # （已废弃：status 异常改用 travel2 公式）
     "letter_retries": 3,
     "collect_workers": 10,
 }
@@ -119,15 +117,17 @@ class Collector12306:
 
     def _rate_limit(self):
         last = getattr(_sess_local, "last_time", 0.0)
-        low, high = CONFIG["min_interval"]
+        low, high = CONFIG["min_interval"], CONFIG["min_interval"]
+        if isinstance(CONFIG["min_interval"], tuple):
+            low, high = CONFIG["min_interval"]
         delay = random.uniform(low, high)
         if time.time() - last < delay:
             time.sleep(delay - (time.time() - last))
         _sess_local.last_time = time.time()
 
     def _block_wait(self, attempt: int) -> float:
-        return min(CONFIG["block_base"] * (2 ** (attempt - 1)), CONFIG["block_cap"]) \
-            + random.uniform(1, 3)
+        """限流退避（travel2 同款：10~20 秒 × 尝试次数，重罚式等待）"""
+        return random.uniform(10, 20) * attempt
 
     def _request(self, url: str, params: dict, retries: Optional[int] = None) -> Optional[dict]:
         max_attempts = retries if retries is not None else CONFIG["max_retries"]
@@ -154,8 +154,7 @@ class Collector12306:
                     self._inc("success")
                     return data
                 if attempt < max_attempts:
-                    low, high = CONFIG["retry_sleep"]
-                    time.sleep(random.uniform(low, high) * attempt)
+                    time.sleep(CONFIG["min_interval"] * 5 * attempt)   # travel2 同款
                     continue
                 self._inc("failed")
                 return None

@@ -248,7 +248,7 @@
     setView("chat");
     chatEl().innerHTML = "";
     const d = await API.getSession(sid);
-    resetPanel();
+    resetPanel(sid);
     mergePanel(Object.values(d.solutions || {}), "");
     let lastEntry = null;
     for (const item of d.trace || []) {
@@ -436,9 +436,8 @@
       },
       thinking_delta: (p) => {
         if (!AI.think) return;
-        // 思考文字插在工具块之前（工具调用属于本轮思考，新的文字在工具块上方追加）
-        const txt = document.createTextNode(p.delta);
-        AI.think.body.insertBefore(txt, AI.think.body.firstChild || null);
+        // 顺序追加（工具块在思考结束后才插入，天然位于文字之后，顺序不会反）
+        AI.think.body.appendChild(document.createTextNode(p.delta));
         AI.think.summary.innerHTML =
           `<span class="dot"></span>思考中… ${AI.think.body.textContent.length} 字`;
         if (nearBottom()) AI.think.body.scrollTop = AI.think.body.scrollHeight;
@@ -578,15 +577,16 @@
     if (currentCtrl) currentCtrl.abort();
   }
 
-  /* ═══════════ 对话详情（行式平铺全量数据） ═══════════ */
-  let PANEL = { byId: {}, order: [], meta: "" };
+  /* ═══════════ 对话详情（行式平铺全量数据，严格会话隔离） ═══════════ */
+  let PANEL = { sid: null, byId: {}, order: [], meta: "" };
 
-  function resetPanel() {
-    PANEL = { byId: {}, order: [], meta: "" };
+  function resetPanel(sid) {
+    PANEL = { sid: sid != null ? sid : CURRENT_SID, byId: {}, order: [], meta: "" };
     updateDetailBadge();
   }
   function addPanelSol(s) {
     if (!s || !s.solution_id) return;
+    if (PANEL.sid !== CURRENT_SID) resetPanel();   // 会话切换保险：绝不混入其他对话的方案
     if (!PANEL.byId[s.solution_id]) PANEL.order.push(s.solution_id);
     PANEL.byId[s.solution_id] = s;
   }
@@ -710,11 +710,27 @@
     }
   }
 
-  /* 正式输出内的方案总表（由详情数据直出；target 为空时挂当前流式卡） */
+  /* 正式输出内的方案总表（由详情数据直出；target 为空时挂当前流式卡）。
+     聊天流中不展示"核实后无票"的方案（对话详情仍显示全部）。 */
   function renderPlanTable(target) {
     if (!PANEL.order.length) return;
-    const rows = PANEL.order.map(sid => {
-      const s = PANEL.byId[sid];
+    const all = PANEL.order.map(sid => PANEL.byId[sid]);
+    const visible = all.filter(s => !(s.checked && !s.can_buy));
+    if (!visible.length) {
+      const div = document.createElement("div");
+      div.className = "alert";
+      div.style.background = "var(--err-bg)";
+      div.style.borderColor = "var(--err-bd)";
+      div.style.color = "var(--err-fg)";
+      div.textContent = "本次核实的方案均无票。完整数据（含无票方案）可在「对话详情」中查看，或在对话中让 AI 推荐其他车次。";
+      const host = target || (AI ? AI.card : null);
+      if (host) host.appendChild(div);
+      scrollBottom();
+      return;
+    }
+    const rows = visible.map(sid0 => {
+      const sid = sid0.solution_id;
+      const s = sid0;
       const seg0 = (s.segments && s.segments[0]) || {};
       const last = (s.segments && s.segments[s.segments.length - 1]) || {};
       let st = `<span class="st-unknown">未核实</span>`;
