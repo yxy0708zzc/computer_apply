@@ -343,16 +343,18 @@ class ManualSearchIn(BaseModel):
     from_station: str
     to_station: str
     date: Optional[str] = None
-    seat_type: str = "二等座"
+    seat_type: str = "不限"          # "不限"=估价按二等座档（缺失回落硬座）、核实取任一可购席
     allow_transfer: bool = True
     max_transfers: int = 1
     prefer_direct: bool = True
+    train_type: str = "all"
     depart_after: Optional[str] = None
     depart_before: Optional[str] = None
     arrive_after: Optional[str] = None
     arrive_before: Optional[str] = None
     sort_by: str = "comprehensive"
     max_results: int = 30
+    fuzzy: bool = False              # 站名模糊：候选站组合逐一查询（前端默认勾选传入）
 
 
 class CheckBatchIn(BaseModel):
@@ -421,40 +423,97 @@ def _hhmm(v: Optional[str]) -> Optional[str]:
 
 @app.post("/api/manual/search")
 def api_manual_search(body: ManualSearchIn):
-    """手动模式：表单直连本地方案引擎（不经过 AI）"""
+    """手动模式：表单直连本地方案引擎（不经过 AI）。
+    fuzzy=True：出发/到达按站名子串展开候选站（如"北京"含北京西/南/丰台…），
+    候选对逐一枚举，合并去重后统一评分排序取前 N。"""
     conn = db.get_railway_conn()
     try:
-        from_v = db.resolve_station_name_or_id(conn, body.from_station)
-        to_v = db.resolve_station_name_or_id(conn, body.to_station)
-        if not from_v or not to_v:
-            raise HTTPException(400, f"无法识别车站: {body.from_station if not from_v else body.to_station}")
         date = online.normalize_date(body.date)
-        if body.seat_type not in db.SEAT_CN_LIST:
+        if body.seat_type != "不限" and body.seat_type not in db.SEAT_CN_LIST:
             raise HTTPException(400, f"坐席不合法: {body.seat_type}")
-        # 手动模式统一策略：后端枚举 = 要求数 × 10，去重打分后返回前 N
+        # "不限"席：估价用二等座档（缺失回落硬座）；核实时由 online 按"不限"取任一可购席
+        est_seat = "二等座" if body.seat_type == "不限" else body.seat_type
+        seat_fb = "硬座" if est_seat == "二等座" else None
         n = max(1, min(int(body.max_results), 60))
-        sols = planner.plan_solutions(
-            conn, from_v, to_v,
-            seat_type=body.seat_type,
-            allow_transfer=body.allow_transfer,
-            max_transfers=body.max_transfers,
-            prefer_direct=body.prefer_direct,
-            depart_after=_hhmm(body.depart_after),
-            depart_before=_hhmm(body.depart_before),
-            arrive_after=_hhmm(body.arrive_after),
-            arrive_before=_hhmm(body.arrive_before),
-            sort_by=body.sort_by,
-            max_results=n,
-            auto_expand=True,
-            enum_total=n * tools_mod.MANUAL_ENUM_MULT,
-        )
+
+        def _plan(f_v, t_v, enum_total):
+            return planner.plan_solutions(
+                conn, f_v, t_v,
+                seat_type=est_seat, seat_fallback=seat_fb,
+                allow_transfer=body.allow_transfer,
+                max_transfers=body.max_transfers,
+                prefer_direct=body.prefer_direct,
+                depart_after=_hhmm(body.depart_after),
+                depart_before=_hhmm(body.depart_before),
+                arrive_after=_hhmm(body.arrive_after),
+                arrive_before=_hhmm(body.arrive_before),
+                sort_by="comprehensive",          # 统一出评分，合并后按 body.sort_by 重排
+                max_results=n,
+                auto_expand=True,
+                enum_total=enum_total,
+                train_type=body.train_type if body.train_type in planner.VALID_TRAIN_TYPE else "all",
+            )
+
+        if body.fuzzy:
+            def _expand(kw):
+                # 中文站名一律展开所有含该词的站（含精确站自身，如"北京"含北京西/南/丰台…）；
+                # 电报码（ASCII）走精确单站
+                if kw.isascii():
+                    v = db.resolve_station_exact(conn, kw)
+                    return [v] if v else []
+                cands = [c["station_id"] for c in db.search_stations(conn, kw, limit=8)]
+                v = db.resolve_station_exact(conn, kw)
+                if v and v not in cands:
+                    cands.insert(0, v)
+                return cands[:8]
+
+            from_c = _expand((body.from_station or "").strip())
+            to_c = _expand((body.to_station or "").strip())
+            if not from_c or not to_c:
+                bad = body.from_station if not from_c else body.to_station
+                raise HTTPException(400, f"无法识别车站: {bad}")
+            pairs = [(f, t) for f in from_c for t in to_c][:40]   # 组合上限
+            per_enum = max(40, n * 4)                             # 每对候选池
+            all_sols, seen = [], set()
+            for f_v, t_v in pairs:
+                for s in _plan(f_v, t_v, per_enum):
+                    sig = tuple((g.get("train_no") or g["train_num"],
+                                 g["from_station_id"], g["to_station_id"])
+                                for g in s.get("segments", []))
+                    if sig in seen:
+                        continue
+                    seen.add(sig)
+                    all_sols.append(s)
+            planner.score_solutions(all_sols)                     # 跨池统一评分
+            sols = planner.sort_solutions(all_sols, body.sort_by)
+            from_label = f"{body.from_station}（{len(from_c)} 站）"
+            to_label = f"{body.to_station}（{len(to_c)} 站）"
+            total_enum = per_enum * len(pairs)
+        else:
+            from_v = db.resolve_station_name_or_id(conn, body.from_station)
+            to_v = db.resolve_station_name_or_id(conn, body.to_station)
+            if not from_v or not to_v:
+                raise HTTPException(400, f"无法识别车站: "
+                                       f"{body.from_station if not from_v else body.to_station}")
+            sols = planner.sort_solutions(
+                _plan(from_v, to_v, n * tools_mod.MANUAL_ENUM_MULT),
+                body.sort_by, prefer_direct=body.prefer_direct)
+            from_label = db.get_station_name(conn, from_v)
+            to_label = db.get_station_name(conn, to_v)
+            total_enum = n * tools_mod.MANUAL_ENUM_MULT
+
         for i, s in enumerate(sols[:n]):
             s["solution_id"] = f"m{i+1}"
             s["date"] = date
             s["seat_type"] = body.seat_type
-        return {"date": date, "from": db.get_station_name(conn, from_v),
-                "to": db.get_station_name(conn, to_v),
-                "enum_total": n * tools_mod.MANUAL_ENUM_MULT,
+            segs = s.get("segments") or []
+            if segs and (body.fuzzy or len(segs) > 1):
+                s["route_note"] = (f"{segs[0]['from_station_name']}→{segs[-1]['to_station_name']}"
+                                   + (f"（经{'、'.join(g['to_station_name'] for g in segs[:-1])}）"
+                                      if len(segs) > 1 else ""))
+        return {"date": date, "from": from_label,
+                "to": to_label,
+                "enum_total": total_enum,
                 "count": min(len(sols), n), "solutions": sols[:n]}
     except HTTPException:
         raise

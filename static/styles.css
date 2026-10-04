@@ -343,6 +343,14 @@ label input, label select { margin-top: 5px; }
 .field-pair { display: flex; gap: 10px; }
 .field-pair label { flex: 1; }
 .manual-tip { font-size: 11.5px; color: var(--ink4); line-height: 1.7; margin-top: 12px; border-top: 1px dashed var(--hair-soft); padding-top: 10px; }
+.manual-form .mf-fuzzy {
+  display: flex; align-items: center; gap: 7px;
+  font-size: 12px; color: var(--ink3); cursor: pointer; margin-bottom: 12px;
+}
+.manual-form .mf-fuzzy input {
+  width: auto; margin: 0; padding: 0; flex: none;
+  accent-color: var(--red-d); cursor: pointer;
+}
 .manual-result { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
 .mr-meta {
   padding: 10px 22px; font-size: 12.5px; color: var(--red-d); background: var(--surface);

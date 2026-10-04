@@ -302,36 +302,79 @@ class Collector12306:
 # 入库（tripai schema）
 # ============================================================
 
+def fill_alias_stops() -> Dict[str, int]:
+    """离线补齐改号车经停（纯 SQL，不联网）：同 train_no 组内已有经停的代表码，
+    复制同一份经停到组内尚无经停的别名码。
+    用于对"旧逻辑（单码）时期"采集的数据一次性补齐。返回统计。"""
+    conn = get_conn()
+    try:
+        groups: Dict[str, List[str]] = {}
+        for r in conn.execute("SELECT train_num, train_no FROM trains"):
+            groups.setdefault(r[1], []).append(r[0])
+        have = {r[0] for r in conn.execute("SELECT DISTINCT train_num FROM train_stops")}
+        filled = codes_added = 0
+        for tno, codes in groups.items():
+            src = [c for c in codes if c in have]
+            missing = [c for c in codes if c not in have]
+            if not src or not missing:
+                continue
+            for code in missing:
+                rows = conn.execute(
+                    "SELECT stop_no, station_id, station_name, stop_time "
+                    "FROM train_stops WHERE train_num = ?", (src[0],)).fetchall()
+                for s in rows:
+                    conn.execute(
+                        "INSERT OR REPLACE INTO train_stops "
+                        "(train_num, stop_no, station_id, station_name, stop_time) "
+                        "VALUES (?, ?, ?, ?, ?)",
+                        (code, s[0], s[1], s[2], s[3]))
+                filled += 1
+                codes_added += len(rows)
+        conn.commit()
+        return {"filled": filled, "codes_added": codes_added}
+    finally:
+        conn.close()
+
+
 def save_discovered(conn, discovered: Dict[str, str]) -> tuple:
-    """写入 trains 表；同 train_no 的后续改号码跳过（train_no UNIQUE）。
-    返回 (待采集 [(code, train_no)], 冲突跳过数)"""
+    """写入 trains 表（同向改号车：同一 train_no 的**所有显示码都入库**，共用经停——
+    railway 同款思路，别名段运行的区间也能被方案枚举覆盖）。
+    返回 (待采集 [(代表码, train_no)], 组数)。
+    组内其余码由 collect_stops 采集后复制同一份经停。"""
     known = {r["train_num"]: r["train_no"]
              for r in conn.execute("SELECT train_num, train_no FROM trains")}
-    taken = set(known.values())          # 已被占用的 train_no
-    pending, seen, conflicts = [], set(), 0
+    groups: Dict[str, List[str]] = {}          # train_no -> [codes]
     for code, train_no in discovered.items():
-        if known.get(code) == train_no:
-            pass                          # 已知且一致
-        elif code in known:
-            continue                      # 该码已登记过别的 train_no（跨天改号），跳过
-        elif train_no in taken:
-            conflicts += 1                # 同 train_no 改号车：tripai schema 只留一码
-            continue
-        else:
-            conn.execute("INSERT OR REPLACE INTO trains (train_num, train_no) VALUES (?, ?)",
-                         (code, train_no))
-            known[code] = train_no
-            taken.add(train_no)
-        if train_no in seen:
-            continue
-        seen.add(train_no)
-        pending.append((code, train_no))
+        if code in known and known[code] != train_no:
+            continue                           # 该码已登记过别的 train_no（跨天码复用），跳过
+        conn.execute("INSERT OR IGNORE INTO trains (train_num, train_no) VALUES (?, ?)",
+                     (code, train_no))
+        known[code] = train_no
+        groups.setdefault(train_no, []).append(code)
     conn.commit()
-    return pending, conflicts
+    # 每组取代表码（组内首个"尚无经停"的码；全组有经停则不入 pending）
+    rc = get_conn(readonly=True)
+    try:
+        have = {r[0] for r in rc.execute("SELECT DISTINCT train_num FROM train_stops")}
+    finally:
+        rc.close()
+    pending, multi = [], 0
+    for tno, codes in groups.items():
+        missing = [c for c in codes if c not in have]
+        if not missing:
+            continue
+        pending.append((missing[0], tno))
+        if len(codes) > 1:
+            multi += 1
+    if multi:
+        print(f"  同 train_no 多码组 {multi} 个（别名码共用同一份经停）")
+    return pending, groups
 
 
-def collect_stops(collector: Collector12306, pending: List, limit: Optional[int]):
-    """并发采集经停并入库（tripai schema：train_num + stop_no + stop_time）"""
+def collect_stops(collector: Collector12306, pending: List, groups: Dict[str, List[str]],
+                  limit: Optional[int]):
+    """并发采集经停并入库（tripai schema：train_num + stop_no + stop_time）。
+    同 train_no 的别名码复制同一份经停（改号段区间枚举覆盖）。"""
     if limit:
         pending = pending[:limit]
     total = len(pending)
@@ -342,41 +385,45 @@ def collect_stops(collector: Collector12306, pending: List, limit: Optional[int]
         return
     collector._get_station_map()      # 主线程预热站名映射
     collected = no_stops = done = 0
+    inserted = 0
     no_stop_codes = []
     lock = threading.Lock()
 
     conn = get_conn()
     try:
         def _work(item):
-            code, tno = item
+            rep_code, tno = item
             return item, collector.query_route_stations(tno, CONFIG["query_date"])
 
         with concurrent.futures.ThreadPoolExecutor(
                 max_workers=CONFIG["collect_workers"]) as ex:
             for future in concurrent.futures.as_completed(
                     [ex.submit(_work, it) for it in pending]):
-                (code, tno), stops = future.result()
+                (rep_code, tno), stops = future.result()
+                codes = groups.get(tno, [rep_code])
                 with lock:
                     if stops:
-                        conn.execute("DELETE FROM train_stops WHERE train_num = ?", (code,))
-                        for s in stops:
-                            conn.execute(
-                                "INSERT OR REPLACE INTO train_stops "
-                                "(train_num, stop_no, station_id, station_name, stop_time) "
-                                "VALUES (?, ?, ?, ?, ?)",
-                                (code, s["station_no"], s["station_id"],
-                                 s["station_name"], s["stop_time"]))
+                        for code in codes:      # 别名码复制同一份经停
+                            conn.execute("DELETE FROM train_stops WHERE train_num = ?", (code,))
+                            for s in stops:
+                                conn.execute(
+                                    "INSERT OR REPLACE INTO train_stops "
+                                    "(train_num, stop_no, station_id, station_name, stop_time) "
+                                    "VALUES (?, ?, ?, ?, ?)",
+                                    (code, s["station_no"], s["station_id"],
+                                     s["station_name"], s["stop_time"]))
                         conn.commit()
                         collected += 1
+                        inserted += len(codes)
                     else:
                         no_stops += 1
-                        no_stop_codes.append(code)
+                        no_stop_codes.extend(codes)
                     done += 1
                     if done % 20 == 0 or done == total:
                         print(f"  进度 {done}/{total}（成功 {collected}，无经停 {no_stops}）")
     finally:
         conn.close()
-    print(f"  [经停] 完成 {done}：入库 {collected}，无经停/失败 {no_stops}")
+    print(f"  [经停] 完成 {done} 组：入库 {collected} 组（{inserted} 码），无经停/失败 {no_stops}")
     if no_stop_codes:
         print(f"  无经停车次: {no_stop_codes[:20]}{'...' if len(no_stop_codes) > 20 else ''}")
 
@@ -388,13 +435,22 @@ def main():
     ap.add_argument("--digit", action="store_true", default=True,
                     help="包含纯数字车次（默认开）")
     ap.add_argument("--no-digit", dest="digit", action="store_false")
-    ap.add_argument("--limit", type=int, default=None, help="本次最多采集车次数（实测用）")
+    ap.add_argument("--limit", type=int, default=None, help="本次最多采集车次数（按组）")
+    ap.add_argument("--fill-alias", action="store_true",
+                    help="仅离线补齐改号车别名码的经停（纯 SQL，秒级，不联网）")
     ap.add_argument("--stats", action="store_true", help="仅查看库规模")
     args = ap.parse_args()
 
     if args.stats:
         for k, v in stats().items():
             print(f"{k}: {v}")
+        return
+
+    if args.fill_alias:
+        init_db()
+        r = fill_alias_stops()
+        print(f"[补齐] 已为 {r['filled']} 个改号别名码复制经停（新增 {r['codes_added']} 行）")
+        print(f"[完成] station_trains 已重建（{refresh_station_trains()} 站）")
         return
 
     init_db()
@@ -407,11 +463,9 @@ def main():
 
     conn = get_conn()
     try:
-        pending, conflicts = save_discovered(conn, discovered)
+        pending, groups = save_discovered(conn, discovered)
     finally:
         conn.close()
-    if conflicts:
-        print(f"  ⚠ 跳过 {conflicts} 个同 train_no 改号码（tripai schema 每车一码）")
 
     existing = 0
     conn = get_conn(readonly=True)
@@ -423,7 +477,11 @@ def main():
     existing = len(have)
     print(f"  库中已有经停 {existing} 车，跳过重复")
 
-    collect_stops(collector, pending, args.limit)
+    collect_stops(collector, pending, groups, args.limit)
+
+    r = fill_alias_stops()               # 采集结束自动补齐别名码经停（纯 SQL）
+    if r["filled"]:
+        print(f"  [补齐] 改号别名码 {r['filled']} 个已复制经停")
 
     n = refresh_station_trains()
     print(f"[完成] station_trains 已重建（{n} 站）")

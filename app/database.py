@@ -143,6 +143,24 @@ def resolve_station_name_or_id(conn: sqlite3.Connection, input_str: str) -> Opti
     return None
 
 
+def resolve_station_exact(conn: sqlite3.Connection, input_str: str) -> Optional[str]:
+    """精确解析：电报码或站名全称（容忍"xx站"后缀）；不做子串兜底，
+    供模糊搜索先精确命中、未命中再展开候选。"""
+    s = (input_str or "").strip()
+    if not s:
+        return None
+    if validate_station_exists(conn, s):
+        return s
+    for name in (s, s[:-1] if s.endswith("站") else s):
+        if not name:
+            continue
+        row = conn.execute("SELECT station_id FROM stations WHERE station_name = ?",
+                           (name,)).fetchone()
+        if row:
+            return row[0]
+    return None
+
+
 def search_stations(conn: sqlite3.Connection, keyword: str, limit: int = 20) -> List[Dict]:
     """站名/拼音/电报码模糊搜索（消歧用）：[{station_id, station_name}]"""
     kw = f"%{(keyword or '').strip()}%"

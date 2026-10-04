@@ -53,6 +53,8 @@ TOOLS_SCHEMA: List[Dict] = [
                     "seat_type": {"type": "string", "enum": db.SEAT_CN_LIST, "description": "坐席，默认二等座。普速车无二等座，需要时指定硬座/硬卧"},
                     "allow_transfer": {"type": "boolean", "description": "是否允许换乘，默认 true"},
                     "max_transfers": {"type": "integer", "description": "最大换乘次数，默认 1，最多 2"},
+                    "train_type": {"type": "string", "enum": ["all", "highspeed", "normal"],
+                                   "description": "车型筛选：all 不限（默认）/ highspeed 高铁动车（G/C/D 字头）/ normal 普速（K/T/Z/数字字头）。方案的每一列车都需符合"},
                     "prefer_direct": {"type": "boolean", "description": "优先直达（排序加权），默认 true"},
                     "depart_after": {"type": "string", "description": "最早出发时刻 HH:MM（可选）"},
                     "depart_before": {"type": "string", "description": "最晚出发时刻 HH:MM（可选）"},
@@ -193,6 +195,9 @@ def execute_tool(name: str, args: Dict, ctx: ToolContext,
                 sort_by=args.get("sort_by") or "comprehensive",
                 max_results=ai_max,
                 enum_total=enum_total,
+                train_type=args.get("train_type") or "all",
+                # AI 模式二等座价缺失时段级回落硬座价（普速车无二等座，存的是硬座价）
+                seat_fallback=("硬座" if seat == "二等座" else None),
             )
             stored = ctx.store(sols[:panel_max], date)   # 详情页：前 2N
             for s in stored:

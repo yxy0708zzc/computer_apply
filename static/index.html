@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>铁程 · 智能火车出行规划</title>
-<link rel="stylesheet" href="/styles.css?v=9">
+<link rel="stylesheet" href="/styles.css?v=11">
 <script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/dompurify@3.1.6/dist/purify.min.js"></script>
 </head>
@@ -121,17 +121,28 @@
     <div class="manual-wrap">
       <aside class="manual-form">
         <div class="manual-head">手动查票 · 直连引擎</div>
-        <label>出发站 <input id="mf-from" type="text" placeholder="站名或电报码，如 北京南"></label>
-        <label>到达站 <input id="mf-to" type="text" placeholder="站名或电报码，如 上海虹桥"></label>
+        <label>出发站 <input id="mf-from" type="text" placeholder="站名或电报码，如 北京"></label>
+        <label>到达站 <input id="mf-to" type="text" placeholder="站名或电报码，如 上海"></label>
+        <label class="mf-fuzzy" style="display:flex;align-items:center;gap:7px;font-size:12px;color:var(--ink3);cursor:pointer;margin-bottom:12px"
+               title="出发/到达按站名子串展开候选站（如“北京”含北京西/南/丰台），逐组合查询后合并排序"
+        >站名模糊 <input id="mf-fuzzy" type="checkbox" checked
+          style="width:auto;margin:0;padding:0;flex:none;accent-color:#9c1b1c;cursor:pointer"></label>
         <label>出行日期（必填）<input id="mf-date" type="date"></label>
         <label>坐席
-          <select id="mf-seat"></select>
+          <select id="mf-seat"><option>不限</option></select>
         </label>
         <label>换乘次数
           <select id="mf-transfers">
             <option value="0">直达</option>
             <option value="1" selected>最多 1 次</option>
             <option value="2">最多 2 次</option>
+          </select>
+        </label>
+        <label>车型
+          <select id="mf-ttype">
+            <option value="all">不限</option>
+            <option value="highspeed">高铁动车（G/C/D）</option>
+            <option value="normal">普速（K/T/Z/数字）</option>
           </select>
         </label>
         <div class="field-pair">
@@ -199,7 +210,7 @@
 
 <div id="toast" class="toast hidden"></div>
 
-<script src="/api.js?v=9"></script>
-<script src="/app.js?v=9"></script>
+<script src="/api.js?v=14"></script>
+<script src="/app.js?v=14"></script>
 </body>
 </html>

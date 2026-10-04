@@ -20,14 +20,18 @@ DB_PATH = os.path.join(_BASE_DIR, "data", "railway.db")
 PRICES_DB = os.path.join(_BASE_DIR, "data", "prices.db")
 
 _SCHEMA = """
+DROP TABLE IF EXISTS prices;
 CREATE TABLE IF NOT EXISTS stations (
     station_id TEXT PRIMARY KEY,
     station_name TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS trains (
     train_num TEXT PRIMARY KEY,
-    train_no TEXT UNIQUE NOT NULL
+    train_no TEXT NOT NULL
 );
+CREATE INDEX IF NOT EXISTS idx_trains_train_no ON trains(train_no);
+-- 同向改号车：同一 train_no 的多个显示码各占一行、共用同一份经停
+-- （railway 同款思路；别名段运行的区间也能被方案枚举覆盖）
 CREATE TABLE IF NOT EXISTS train_stops (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     train_num TEXT NOT NULL,
@@ -46,6 +50,10 @@ CREATE TABLE IF NOT EXISTS station_trains (
     station_name TEXT NOT NULL,
     data TEXT NOT NULL
 );
+"""
+
+# 票价库 schema（独立文件 prices.db，price_collector 使用）
+_PRICES_SCHEMA = """
 CREATE TABLE IF NOT EXISTS prices (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     train_num TEXT NOT NULL,
@@ -82,10 +90,21 @@ def get_prices_conn() -> sqlite3.Connection:
 
 
 def init_db():
-    """建表（已存在则跳过；不删除任何数据）"""
+    """建列车库表（已存在则跳过；顺带清理历史上误建到 railway.db 的 prices 表）"""
     conn = get_conn()
     try:
         conn.executescript(_SCHEMA)
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def init_prices_db():
+    """建票价库表（prices.db 不存在/空库时安全；price_collector 启动时调用）"""
+    os.makedirs(os.path.dirname(PRICES_DB), exist_ok=True)
+    conn = sqlite3.connect(PRICES_DB, timeout=30)
+    try:
+        conn.executescript(_PRICES_SCHEMA)
         conn.commit()
     finally:
         conn.close()

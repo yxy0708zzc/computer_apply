@@ -64,63 +64,39 @@ def delete_trains(train_nums: List[str]) -> int:
 
 
 def cleanup_incomplete(threshold_all: bool = False) -> int:
-    """程序化接口（price_collector --cleanup/--cleanup-all 复用）：
-    返回清理/清空的车次数"""
-    if threshold_all:
-        pc = get_prices_conn()
-        try:
-            pc.execute("DELETE FROM prices")
-            pc.commit()
-            n = pc.execute("SELECT COUNT(DISTINCT train_num) FROM prices").fetchone()[0]
-        finally:
-            pc.close()
-        return 0                      # 全清后无车次可言
-    bad = scan_incomplete()
-    return delete_trains([b["train_num"] for b in bad])
+    """程序化接口（price_collector --cleanup/--cleanup-all 复用）。
+    ⚠️ 删除功能已禁用：新版爬虫跳段继续后，含不发售段的车永远凑不齐 C(n,2)，
+    删了重爬也无法补全（12306 不发售是永久缺失），只会白白损失已爬到的数据。"""
+    print("[cleanup] 删除功能已禁用：失败段为 12306 不发售，删了重爬也无法补全。"
+          "如需重爬某趟车请用 price_collector --train 车次号 --force")
+    return 0
 
 
 def main():
     ap = argparse.ArgumentParser(
-        description="票价数据清理：数据不全的车次全量删库，配合 price_collector --resume 重爬")
+        description="票价数据只读体检（删除功能已禁用：跳段车永远不齐 C(n,2)，删了无法补全）")
     ap.add_argument("--check", action="store_true",
-                    help="只读体检：列出数据不全清单，不删除")
-    ap.add_argument("--all", action="store_true",
-                    help="全量清空票价库（慎用）")
+                    help="只读体检：列出数据不全清单，不删除（默认动作）")
+    ap.add_argument("--all", action="store_true", help="已禁用，无效果")
     args = ap.parse_args()
 
     init_db()
 
     if args.all:
-        pc = get_prices_conn()
-        try:
-            n = pc.execute("SELECT COUNT(*) FROM prices").fetchone()[0]
-            pc.execute("DELETE FROM prices")
-            pc.commit()
-            print(f"[全量清空] 已删除 {n} 条票价记录。")
-        finally:
-            pc.close()
+        print("[已禁用] --all 全量清空已下线（删了重爬也无法补全，且会损失已爬数据）。")
         return
 
     bad = scan_incomplete()
     if not bad:
-        print("[体检] 所有车次票价数据完整，无需清理。")
+        print("[体检] 所有车次票价数据完整（或无票价数据）。")
         return
 
-    print(f"[体检] 发现 {len(bad)} 个数据不全的车次：")
+    print(f"[体检] 发现 {len(bad)} 个站对数未达 C(n,2) 的车次（多为含 12306 不发售段，属正常，无需处理）：")
     for b in bad[:30]:
         print(f"  {b['train_num']}: {b['have']}/{b['expected']} 站对（经停 {b['stops']} 站）")
     if len(bad) > 30:
         print(f"  ... 其余 {len(bad) - 30} 个略")
-
-    if args.check:
-        print(f"[只读] 共 {len(bad)} 个待清理（未删除）。加 --help 查看清理方式。")
-        return
-
-    n = delete_trains([b["train_num"] for b in bad])
-    total_rows = 0
-    print(f"[清理] 已删除 {n} 个数据不全车次的全部票价记录。")
-    print("[下一步] 运行 collect.price_collector --resume 自动重爬补全。")
-    _ = total_rows
+    print("[说明] 仅只读展示，不做删除；单趟重爬请用 price_collector --train 车次号 --force")
 
 
 if __name__ == "__main__":

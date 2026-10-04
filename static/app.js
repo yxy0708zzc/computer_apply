@@ -1,4 +1,4 @@
-/* app.js —— tripai 前端 v3
+﻿/* app.js —— tripai 前端 v3
    模式选择（AI 对话 / 手动查票）；agent 执行块（工具调用内嵌思考文字中，随折叠收起）；
    对话详情=行式平铺全量数据；会话右键重命名/删除；手动模式无 AI 直连引擎 */
 (function () {
@@ -790,7 +790,7 @@
     if (manualFormReady) return;
     manualFormReady = true;
     const sel = $("mf-seat");
-    sel.innerHTML = (META.seats || ["二等座"]).map(x => `<option>${esc(x)}</option>`).join("");
+    sel.innerHTML = ["不限"].concat(META.seats || ["二等座"]).map(x => `<option>${esc(x)}</option>`).join("");
     const d = new Date(Date.now() + 3 * 86400000);
     $("mf-date").value = d.toISOString().slice(0, 10);
     $("mf-date").min = new Date().toISOString().slice(0, 10);
@@ -812,6 +812,8 @@
       arrive_after: $("mf-arr-after").value,
       arrive_before: $("mf-arr-before").value,
       sort_by: $("mf-sort").value,
+      train_type: $("mf-ttype") ? $("mf-ttype").value : "all",
+      fuzzy: $("mf-fuzzy") ? $("mf-fuzzy").checked : false,
       max_results: parseInt($("mf-max").value, 10) || 20,
     };
     if (!body.from_station || !body.to_station) {
@@ -826,6 +828,10 @@
     }
     const btn = $("mf-search");
     btn.disabled = true; btn.textContent = "查询中…";
+    // 立即清空右侧并显示查询中：每次点击都有可见的刷新反馈
+    $("mr-meta").classList.remove("hidden");
+    $("mr-meta").textContent = "查询中…";
+    $("mr-body").innerHTML = "";
     try {
       const r = await fetch("/api/manual/search", {
         method: "POST", headers: { "Content-Type": "application/json" },
@@ -834,13 +840,16 @@
       const d = await r.json();
       if (!r.ok) throw new Error(d.detail || `HTTP ${r.status}`);
       MANUAL = { sols: d.solutions, date: d.date, seat: body.seat_type };
-      $("mr-meta").classList.remove("hidden");
+      const ts = new Date().toTimeString().slice(0, 8);
       $("mr-meta").textContent =
-        `${d.from} → ${d.to} · ${d.date} · ${body.seat_type} · 枚举 ${d.enum_total} 候选 · 返回 ${d.count} 个（按评分排序）`;
+        `${d.from} → ${d.to} · ${d.date} · ${body.seat_type} · 枚举 ${d.enum_total} 候选 · 返回 ${d.count} 个 · ${ts}`;
       drawManualRefresh(d.solutions, d.date, body.seat_type);
     } catch (e) {
       err.textContent = e.message;
       err.classList.remove("hidden");
+      $("mr-meta").textContent = `查询失败：${e.message}`;
+      $("mr-body").innerHTML = "";
+      toast("查询失败：" + e.message);
     } finally {
       btn.disabled = false; btn.textContent = "查询方案";
     }

@@ -120,6 +120,31 @@ def _match_seat(seats: Dict[str, str], seat_type: str):
         if key in SEAT_GROUPS.get(seat_type, ()):            # noqa
             return key, val
     return None, None
+
+
+def _seat_count(raw) -> int:
+    """余票原始值 → 可购数（"有"/"充足"≈99，数字直取，其余 0）"""
+    if raw in ("有", "充足"):
+        return 99
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _match_any_seat(seats: Dict[str, str]):
+    """不限席别：按档次高→低返回第一个可购席（余票>0 或"有"）；
+    全部无票时返回（第一个存在席, 原值）供展示 no_seat；空字典返回 (None, None)。"""
+    fallback = (None, None)
+    for _, name in SEAT_FIELDS:
+        raw = seats.get(name)
+        if raw is None:
+            continue
+        if _seat_count(raw) > 0:
+            return name, raw
+        if fallback[0] is None:
+            fallback = (name, raw)
+    return fallback
 # 票价接口字段 → 实际席别名（按车型取对应组）
 PRICE_FIELDS_GD = (("ze_price", "二等座"), ("zy_price", "一等座"), ("swz_price", "商务座"))
 PRICE_FIELDS_PUSU = (("yz_price", "硬座"), ("yw_price", "硬卧"), ("rw_price", "软卧"))
@@ -289,8 +314,11 @@ def match_train(trains: List[Dict], train_num: str, train_no: Optional[str]) -> 
 # 票价（queryAllPublicPrice）
 # ------------------------------------------------------------
 
-def query_prices(date: str, from_code: str, to_code: str) -> Dict[str, Dict[str, float]]:
-    """查询某日某区间各车次票价。返回 {显示码: {class0/1/2: 元}}"""
+def query_prices(date: str, from_code: str, to_code: str,
+                 want: Optional[Dict[str, str]] = None) -> Dict[str, Dict[str, float]]:
+    """查询某日某区间各车次票价。返回 {显示码: {席别名: 元}}。
+    want: {train_num: train_no} 期望车次表——同向改号车在区间内可能以别名码出现，
+    DTO 的 train_no 与期望一致时归一到期望显示码下（railway match_train 同源思路）。"""
     sess = get_session()
     params = {
         "leftTicketDTO.train_date": date,
@@ -325,6 +353,7 @@ def query_prices(date: str, from_code: str, to_code: str) -> Dict[str, Dict[str,
                 time.sleep(1 + attempt)
                 continue
             out: Dict[str, Dict[str, float]] = {}
+            dto_by_tno: Dict[str, Dict[str, float]] = {}
             for item in data.get("data") or []:
                 dto = item.get("queryLeftNewDTO") or {}
                 code = dto.get("station_train_code", "")
@@ -351,6 +380,14 @@ def query_prices(date: str, from_code: str, to_code: str) -> Dict[str, Dict[str,
                                 pass
                 if prices:
                     out[code] = prices
+                    tno = dto.get("train_no", "")
+                    if tno:
+                        dto_by_tno[tno] = prices
+            # 改号车归一：期望显示码不在列表、但 DTO train_no 命中期望 train_no → 归一
+            if want:
+                for want_num, want_tno in want.items():
+                    if want_num not in out and want_tno and want_tno in dto_by_tno:
+                        out[want_num] = dto_by_tno[want_tno]
             return out
         except Exception:
             log.warning("[price] 第%d次异常: %s", attempt, traceback.format_exc(limit=2))
@@ -441,7 +478,13 @@ def check_solutions(solutions: List[Dict], date: str, seat_type: str = "class2",
 
     errors = []
     names = _load_station_names()
-    # 2) 逐区间：余票 + 票价（串行+限速，railway 反爬纪律）
+    # 每区间的期望车次表（改号车归一：DTO train_no 命中期望即归到期望显示码下）
+    want_by_pair: Dict[Tuple[str, str], Dict[str, str]] = {}
+    for s in results:
+        for seg in s.get("segments", []):
+            k = _pair_key(seg["from_station_id"], seg["to_station_id"])
+            want_by_pair.setdefault(k, {})[seg["train_num"]] = seg.get("train_no") or ""
+    # 逐区间：余票 + 票价（串行+限速，railway 反爬纪律）
     tickets_by_pair: Dict[Tuple[str, str], List[Dict]] = {}
     prices_by_pair: Dict[Tuple[str, str], Dict[str, Dict[str, float]]] = {}
     for i, (fid, tid) in enumerate(pairs):
@@ -453,7 +496,8 @@ def check_solutions(solutions: List[Dict], date: str, seat_type: str = "class2",
             errors.append(err)
         tickets_by_pair[(fid, tid)] = trains
         _sleep_interval(strategy)
-        prices_by_pair[(fid, tid)] = query_prices(date, fid, tid)
+        prices_by_pair[(fid, tid)] = query_prices(date, fid, tid,
+                                                  want=want_by_pair.get((fid, tid)))
         _sleep_interval(strategy)
         done += 1
         if on_progress:
@@ -478,8 +522,11 @@ def check_solutions(solutions: List[Dict], date: str, seat_type: str = "class2",
                 continue
             seats = t.get("seats", {})
             seg["all_seats"] = seats   # 该车全部实际席位（同值组名，可能为空=该车无此席）
-            # 主判定席别：同值组匹配（指定"特等座"可命中"商务座/特等座"列）
-            used_cn, raw = _match_seat(seats, seat_type)
+            # 主判定席别："不限"取任一可购席；否则同值组匹配（指定"特等座"可命中"商务座/特等座"列）
+            if seat_type == "不限":
+                used_cn, raw = _match_any_seat(seats)
+            else:
+                used_cn, raw = _match_seat(seats, seat_type)
             seg["seat_cn"] = used_cn
             if raw is None:
                 seg["ticket_status"] = "no_seat" if seats else "unknown"
@@ -507,9 +554,9 @@ def check_solutions(solutions: List[Dict], date: str, seat_type: str = "class2",
                 except ValueError:
                     seg["tickets"] = None
                     seg["ticket_status"] = "unknown"
-            # 票价：显示码匹配；席别归一到存储主名（如"特等座"→"商务座/特等座"）
+            # 票价：显示码匹配；席别归一到实际命中席的存储主名
             p = prices.get(t["code"])
-            seg["price"] = p.get(SEAT_CANONICAL.get(seat_type, seat_type)) if p else None
+            seg["price"] = p.get(SEAT_CANONICAL.get(used_cn, used_cn)) if p and used_cn else None
 
         s["checked"] = True
         s["check_date"] = date

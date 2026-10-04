@@ -29,6 +29,23 @@ MAX_TRANSFERS_LIMIT = 2        # 引擎支持的最多换乘次数
 ENUM_TOTAL_CAP = 1000          # 候选池上限（10:20:200 比例最多尝试 1000 次）
 VALID_SORT = {"comprehensive", "fastest", "cheapest", "earliest",
               "depart_latest", "arrive_earliest"}
+VALID_TRAIN_TYPE = {"all", "highspeed", "normal"}
+# 车型划分（用户定义）：高铁动车 = G/C/D 字头；普速 = 其他（K/T/Z/纯数字）
+HIGHSPEED_PREFIX = ("G", "C", "D")
+
+
+def _match_train_type(sol: Dict, train_type: str) -> bool:
+    """方案的全部段均符合所选车型才通过（all 恒过）"""
+    if train_type not in ("highspeed", "normal"):
+        return True
+    for seg in sol.get("segments", []):
+        ch = (seg.get("train_num") or " ")[0].upper()
+        hs = ch in HIGHSPEED_PREFIX
+        if train_type == "highspeed" and not hs:
+            return False
+        if train_type == "normal" and hs:
+            return False
+    return True
 
 
 def _city_key(station_name: str) -> str:
@@ -102,8 +119,10 @@ def _make_segment(conn, train_num: str, from_id: str, to_id: str,
 
 def _direct_solutions(conn, from_id: str, to_id: str, seat_type: str,
                       win: Dict) -> List[Dict]:
-    """直达方案：同车经过 A→B 的每一辆车"""
+    """直达方案：同车经过 A→B 的每一辆车。
+    改号车同组多码只保留码序最小的一份（SQL 已按 train_num 排序，物理车按 train_no 去重）。"""
     out = []
+    seen_tno: set = set()
     for r in db.get_routes_between(conn, from_id, to_id):
         if not (_valid_hhmm(r["depart_time"]) and _valid_hhmm(r["arrive_time"])):
             continue    # 脏时刻（空/--）车次跳过
@@ -111,6 +130,11 @@ def _direct_solutions(conn, from_id: str, to_id: str, seat_type: str,
             continue
         if not _in_window(r["arrive_time"], win.get("arrive_after"), win.get("arrive_before")):
             continue
+        tno = db.get_train_no(conn, r["train_num"])
+        if tno and tno in seen_tno:
+            continue                      # 同物理车的另一显示码，跳过
+        if tno:
+            seen_tno.add(tno)
         seg = _make_segment(conn, r["train_num"], from_id, to_id,
                             r["depart_time"], r["arrive_time"], seat_type)
         out.append({
@@ -216,7 +240,8 @@ def _transfer_solutions(conn, from_id: str, to_id: str, seat_type: str,
         if is_last:
             sql += " AND uv.station_id = ?"
             params.append(to_id)
-        sql += " LIMIT 6000"
+        # 同组多码最小码先出：前沿名额不被重复码挤占，且去重结果稳定
+        sql += " ORDER BY um.train_num, um.stop_time LIMIT 6000"
         for f_id, t, dep_f, nxt_id, nxt_name, arr_n in conn.execute(sql, params).fetchall():
             next_legs.setdefault(f_id, []).append((t, dep_f, nxt_id, nxt_name, arr_n))
 
@@ -272,11 +297,17 @@ def _transfer_solutions(conn, from_id: str, to_id: str, seat_type: str,
     return out
 
 
-def _price_estimate(conn_unused, sol: Dict, seat_type: str) -> Optional[float]:
-    """历史参考价（换乘=段和；任一段缺失则 None）"""
+def _price_estimate(conn_unused, sol: Dict, seat_type: str,
+                    fallback_seat: Optional[str] = None) -> Optional[float]:
+    """历史参考价（换乘=段和；任一段缺失则 None）。
+    fallback_seat：指定席别某段查不到价时的回落席别（如 AI 模式二等座→硬座，
+    普速段存的是硬座价；段级回落，G+K 换乘方案各自取到可用价）。"""
     total = 0.0
     for seg in sol["segments"]:
         p = db.get_price_estimate(seg["from_station_id"], seg["to_station_id"], seat_type)
+        if p is None and fallback_seat:
+            p = db.get_price_estimate(seg["from_station_id"], seg["to_station_id"],
+                                      fallback_seat)
         if p is None:
             return None
         total += p
@@ -346,7 +377,9 @@ def plan_solutions(conn: sqlite3.Connection, from_id: str, to_id: str, *,
                    sort_by: str = "comprehensive",
                    max_results: int = 8,
                    auto_expand: bool = True,
-                   enum_total: Optional[int] = None) -> List[Dict]:
+                   enum_total: Optional[int] = None,
+                   train_type: str = "all",
+                   seat_fallback: Optional[str] = None) -> List[Dict]:
     """主入口：枚举直达 + 换乘（链式）方案，评分排序。
 
     候选池策略（两模式统一比例）：
@@ -360,13 +393,16 @@ def plan_solutions(conn: sqlite3.Connection, from_id: str, to_id: str, *,
     显式指定 max_transfers 时尊重上限不再加深。"""
     if sort_by not in VALID_SORT:
         sort_by = "comprehensive"
+    if train_type not in VALID_TRAIN_TYPE:
+        train_type = "all"
     if not enum_total or enum_total < max_results:
         enum_total = max_results * 20
     enum_total = min(int(enum_total), ENUM_TOTAL_CAP)   # 最多尝试 1000 次
     win = {"depart_after": depart_after, "depart_before": depart_before,
            "arrive_after": arrive_after, "arrive_before": arrive_before}
 
-    sols = _direct_solutions(conn, from_id, to_id, seat_type, win)
+    sols = [s for s in _direct_solutions(conn, from_id, to_id, seat_type, win)
+            if _match_train_type(s, train_type)]
     seen: set = set()
     for s in sols:
         seen.add(_sig(s))
@@ -383,7 +419,10 @@ def plan_solutions(conn: sqlite3.Connection, from_id: str, to_id: str, *,
                 sig = _sig(s)
                 if sig not in seen:
                     seen.add(sig)
-                    fresh.append(s)
+                    if _match_train_type(s, train_type):
+                        fresh.append(s)
+                    else:
+                        seen.discard(sig)        # 被车型过滤的不占用去重位
             sols += fresh
             pool += len(fresh)
             # 挖到足数（换乘配额满足）再停；或已到上限
@@ -396,7 +435,8 @@ def plan_solutions(conn: sqlite3.Connection, from_id: str, to_id: str, *,
             level += 1
 
     for s in sols:
-        s["price_est"] = _price_estimate(conn, s, seat_type)
+        s["price_est"] = _price_estimate(conn, s, seat_type,
+                                         fallback_seat=seat_fallback)
         try:
             s["cross_midnight"] = s["arrive_time"] < s["depart_time"]
         except Exception:
@@ -404,6 +444,14 @@ def plan_solutions(conn: sqlite3.Connection, from_id: str, to_id: str, *,
     if sort_by == "comprehensive":
         score_solutions(sols)                      # 直接比较排序的模式不评分
 
+    sols = sort_solutions(sols, sort_by, prefer_direct=prefer_direct)
+    return sols[:max(int(max_results), min(int(enum_total), 400))]
+
+
+def sort_solutions(sols: List[Dict], sort_by: str,
+                   prefer_direct: bool = False) -> List[Dict]:
+    """按排序键排序（返回新排序列表）。多候选池合并后（模糊站组合）也可复用：
+    先统一 score_solutions 再以 sort_by 调用本函数。"""
     def key(s):
         direct_rank = (0 if s["type"] == "direct" else 1) if prefer_direct else 0
         if sort_by == "fastest":
@@ -419,13 +467,14 @@ def plan_solutions(conn: sqlite3.Connection, from_id: str, to_id: str, *,
             return (direct_rank, p)
         return -s.get("score", 0)          # comprehensive：按评分降序
 
-    sols.sort(key=key)
-    return sols[:max(int(max_results), min(int(enum_total), 400))]
+    return sorted(sols, key=key)
 
 
 def _sig(s: Dict) -> Tuple:
-    """方案去重签名：车次序列 + 起讫站序列"""
-    return tuple((g["train_num"], g["from_station_id"], g["to_station_id"])
+    """方案去重签名：物理车序列 + 起讫站序列。
+    改号车（同 train_no 多显示码）共用同一物理车，按 train_no 去重，
+    避免同一方案以两个车次号重复展示（保留码序最小者，SQL 已按 train_num 排序）。"""
+    return tuple((g.get("train_no") or g["train_num"], g["from_station_id"], g["to_station_id"])
                  for g in s.get("segments", []))
 
 
