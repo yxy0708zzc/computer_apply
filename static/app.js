@@ -51,6 +51,14 @@
     for (const id of ["mode-view", "chat-view", "detail-view", "manual-view"])
       $(id).classList.toggle("hidden", id !== v + "-view");
     $("btn-detail").classList.toggle("hidden", v === "detail" || PANEL.order.length === 0);
+    $("btn-menu").classList.toggle("hidden", v !== "chat");   // 窄屏抽屉按钮仅对话视图
+    closeDrawer();
+  }
+  function closeDrawer() {
+    const sb = document.querySelector(".sidebar");
+    if (sb) sb.classList.remove("open");
+    const mk = $("drawer-mask");
+    if (mk) mk.classList.add("hidden");
   }
 
   /* ═══════════ 启动 ═══════════ */
@@ -93,6 +101,14 @@
     $("mf-search").onclick = manualSearch;
     $("batch-check-detail").onclick = batchCheckDetail;
     $("batch-check-manual").onclick = () => batchCheckManual();
+    // 窄屏：会话抽屉
+    $("btn-menu").onclick = () => {
+      const sb = document.querySelector(".sidebar");
+      const mk = $("drawer-mask");
+      const open = sb.classList.toggle("open");
+      mk.classList.toggle("hidden", !open);
+    };
+    $("drawer-mask").onclick = closeDrawer;
     // 右键菜单关闭
     document.addEventListener("click", () => $("ctx-menu").classList.add("hidden"));
     $("ctx-menu").addEventListener("click", (e) => e.stopPropagation());

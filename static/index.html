@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>铁程 · 智能火车出行规划</title>
-<link rel="stylesheet" href="/styles.css?v=11">
+<link rel="stylesheet" href="/styles.css?v=15">
 <script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/dompurify@3.1.6/dist/purify.min.js"></script>
 </head>
@@ -51,6 +51,7 @@
         </div>
       </div>
       <div class="mast-right">
+        <button id="btn-menu" class="btn mast-btn hidden">会话</button>
         <span id="model-badge" class="model-badge" title="当前模型">未配置</span>
         <button id="btn-home" class="btn mast-btn">主页</button>
         <button id="btn-detail" class="btn mast-btn hidden">对话详情<span id="detail-count" class="count hidden"></span></button>
@@ -85,6 +86,7 @@
         <div id="session-list" class="session-list"></div>
         <div class="sidebar-foot">右键会话可重命名 / 删除</div>
       </aside>
+      <div id="drawer-mask" class="drawer-mask hidden"></div>
       <main class="chat-col">
         <div id="chat" class="chat"></div>
         <div class="composer">
@@ -210,7 +212,7 @@
 
 <div id="toast" class="toast hidden"></div>
 
-<script src="/api.js?v=14"></script>
-<script src="/app.js?v=14"></script>
+<script src="/api.js?v=15"></script>
+<script src="/app.js?v=15"></script>
 </body>
 </html>
