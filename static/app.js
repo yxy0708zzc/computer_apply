@@ -427,8 +427,19 @@
   async function send() {
     if (streaming) return;
     const text = $("input").value.trim();
-    if (!text || !CURRENT_SID) return;
+    if (!text) return;
     setView("chat");
+    if (!CURRENT_SID) {
+      // 无当前会话（如首启空列表）时自动建档，避免发送被静默拦截
+      try {
+        const r = await API.createSession(text.slice(0, 20) || "新对话");
+        CURRENT_SID = r.session_id;
+        await loadSessions();
+      } catch (e) {
+        toast("创建会话失败：" + e.message);
+        return;
+      }
+    }
     $("input").value = ""; autoGrow();
     addUserMsg(text);
     newAiCard();
