@@ -6,12 +6,9 @@ __pycache__/
 # 虚拟环境
 .venv/
 
-# 运行产物（sessions 会话与 logs 日志不上传；data 数据库可由 collect 包重建，不入库）
+# 运行产物（sessions 会话与 logs 日志不上传；data 数据库已紧凑化 <100MB，随仓库分发）
 sessions/
 *.log
-
-# 本地数据库（prices.db 已数百 MB，超 GitHub 100MB 单文件限制）
-data/*.db
 
 # 密钥配置
 .env

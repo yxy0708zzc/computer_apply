@@ -53,20 +53,27 @@ CREATE TABLE IF NOT EXISTS station_trains (
 """
 
 # 票价库 schema（独立文件 prices.db，price_collector 使用）
+# 紧凑表形 v2：WITHOUT ROWID 主键表（from,to,train）——数据与索引合一，无独立索引；
+#   一行 = 一车次一站对，席别价格收进 seats JSON（键为单字符短键，见 SEAT_SHORT）——
+#   体积从旧行式 352MB 级压至 <100MB
 _PRICES_SCHEMA = """
 CREATE TABLE IF NOT EXISTS prices (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    train_num TEXT NOT NULL,
     from_station_id TEXT NOT NULL,
     to_station_id TEXT NOT NULL,
-    seat TEXT NOT NULL,
-    price REAL NOT NULL,
+    train_num TEXT NOT NULL,
+    seats TEXT NOT NULL,
     crawl_date TEXT NOT NULL,
-    UNIQUE(train_num, from_station_id, to_station_id, seat)
-);
-CREATE INDEX IF NOT EXISTS idx_prices_train_num ON prices(train_num);
-CREATE INDEX IF NOT EXISTS idx_prices_station_pair ON prices(from_station_id, to_station_id);
+    PRIMARY KEY (from_station_id, to_station_id, train_num)
+) WITHOUT ROWID;
 """
+
+# 席别组合名 → 单字符短键（seats JSON 键；与 app/database.py 的映射保持一致）
+SEAT_SHORT = {
+    "二等座/二等包座": "2", "一等座": "1", "商务座/特等座": "0",
+    "硬座": "h", "硬卧/二等卧": "y", "软卧/一等卧": "r", "动卧": "d",
+    "高级软卧": "g", "软座": "u", "无座": "w", "优选一等座": "p",
+}
+SEAT_SHORT_INV = {v: k for k, v in SEAT_SHORT.items()}   # 短键 → 组合名
 
 
 def get_conn(readonly: bool = False) -> sqlite3.Connection:

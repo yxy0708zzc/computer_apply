@@ -28,6 +28,7 @@ collect/price_collector.py —— 票价爬取（与 travel2 step1_collect price
 """
 
 import argparse
+import json
 import os
 import random
 import signal
@@ -41,6 +42,7 @@ from typing import Dict, List, Optional, Tuple
 import requests
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import database
 from database import get_conn, get_prices_conn, init_db, init_prices_db, PRICES_DB
 from cleanup import cleanup_incomplete   # noqa: E402
 
@@ -280,10 +282,15 @@ class PriceCollector:
 
             if self.resume and train_num in already:
                 expected = len(stops) * (len(stops) - 1) // 2
-                actual = p_conn.execute(
-                    "SELECT COUNT(DISTINCT from_station_id || '|' || to_station_id) "
-                    "FROM prices WHERE train_num = ?", (train_num,)).fetchone()[0]
                 n_pairs = len(stops) - 1
+                # 主键点查逐站对计数（WITHOUT ROWID 主键 from,to,train 无 train 前缀索引）
+                actual = sum(
+                    1 for i in range(n_pairs)
+                    if p_conn.execute(
+                        "SELECT 1 FROM prices WHERE from_station_id = ? "
+                        "AND to_station_id = ? AND train_num = ?",
+                        (stops[i]["station_id"], stops[i + 1]["station_id"],
+                         train_num)).fetchone())
                 failed_n = self._failed_counts.get(train_num, 0)   # 已知不发售段数
                 if actual >= expected or actual + failed_n >= n_pairs:
                     print(f"[跳过] {train_num} 已爬取 ({actual}/{expected}，"
@@ -292,7 +299,12 @@ class PriceCollector:
                 print(f"[续爬] {train_num} 数据不全 ({actual}/{expected})，重新爬取")
 
             print(f"[爬取] {train_num} ...")
-            p_conn.execute("DELETE FROM prices WHERE train_num = ?", (train_num,))
+            # 删旧数据：主键序 (from,to,train) 无 train 前缀，逐站对删走主键前缀
+            for i in range(len(stops) - 1):
+                p_conn.execute(
+                    "DELETE FROM prices WHERE from_station_id = ? AND to_station_id = ? "
+                    "AND train_num = ?",
+                    (stops[i]["station_id"], stops[i + 1]["station_id"], train_num))
             p_conn.commit()
             ok, fail = self._crawl_pairs(p_conn, train_num, stops, expected_tno,
                                          session=local if own else None)
@@ -352,53 +364,61 @@ class PriceCollector:
                 pair_fail += 1
                 continue
 
-            for seat, price in prices.items():
-                p_conn.execute(
-                    "INSERT OR REPLACE INTO prices "
-                    "(train_num, from_station_id, to_station_id, seat, price, crawl_date) "
-                    "VALUES (?, ?, ?, ?, ?, ?)",
-                    (train_num, f["station_id"], t["station_id"], seat, price, today))
+            # 紧凑表形 v2：WITHOUT ROWID 主键(from,to,train)，席别短键 JSON 整行覆盖
+            p_conn.execute(
+                "INSERT OR REPLACE INTO prices "
+                "(from_station_id, to_station_id, train_num, seats, crawl_date) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (f["station_id"], t["station_id"], train_num,
+                 json.dumps({database.SEAT_SHORT[k]: v for k, v in prices.items()
+                             if k in database.SEAT_SHORT},
+                            ensure_ascii=False, separators=(",", ":")), today))
             p_conn.commit()
             pair_ok += 1
             print(f"  ✓ {f['station_name']}→{t['station_name']} {prices}")
         return pair_ok, pair_fail
 
     def _compute_pairs(self, p_conn, train_num: str, stops: List[dict]) -> int:
-        """非相邻段票价 = 相邻段累加（各席别独立）；相邻段不全则跳过"""
-        existing = {(r["from_station_id"], r["to_station_id"])
-                    for r in p_conn.execute(
-                        "SELECT DISTINCT from_station_id, to_station_id FROM prices "
-                        "WHERE train_num = ?", (train_num,))}
+        """非相邻段票价 = 相邻段逐席别累加（相邻段不齐则跳过，返回补算条数）。
+        紧凑表形：相邻段一行多席（seats JSON），非相邻段按席别独立累加后仍存为一行。"""
+        adj = {(r["from_station_id"], r["to_station_id"]):
+               {database.SEAT_SHORT_INV.get(k, k): v
+                for k, v in json.loads(r["seats"]).items()}
+               for r in p_conn.execute(
+                   "SELECT from_station_id, to_station_id, seats FROM prices "
+                   "WHERE train_num = ?", (train_num,))}
         all_adj = {(stops[i]["station_id"], stops[i + 1]["station_id"])
                    for i in range(len(stops) - 1)}
-        if all_adj - existing:
+        if all_adj - set(adj):
             return 0
-        adj = {(r["from_station_id"], r["to_station_id"], r["seat"]): r["price"]
-               for r in p_conn.execute(
-                   "SELECT from_station_id, to_station_id, seat, price FROM prices "
-                   "WHERE train_num = ?", (train_num,))}
-        seats = [r[0] for r in p_conn.execute(
-            "SELECT DISTINCT seat FROM prices WHERE train_num = ?", (train_num,))]
+        seats_all = sorted({k for m in adj.values() for k in m})   # 该车出现过的全部席别
         n, computed = len(stops), 0
         crawl_date = datetime.now().strftime("%Y-%m-%d")
         for i in range(n):
             for j in range(i + 2, n):
                 f_id, t_id = stops[i]["station_id"], stops[j]["station_id"]
-                for seat in seats:
+                merged: Dict[str, float] = {}
+                for seat in seats_all:
                     total, valid = 0.0, True
                     for k in range(i, j):
-                        key = (stops[k]["station_id"], stops[k + 1]["station_id"], seat)
-                        if key not in adj:
+                        m = adj.get((stops[k]["station_id"], stops[k + 1]["station_id"]), {})
+                        if seat not in m:
                             valid = False
                             break
-                        total += adj[key]
+                        total += m[seat]
                     if valid:
-                        p_conn.execute(
-                            "INSERT OR REPLACE INTO prices "
-                            "(train_num, from_station_id, to_station_id, seat, price, crawl_date) "
-                            "VALUES (?, ?, ?, ?, ?, ?)",
-                            (train_num, f_id, t_id, seat, round(total, 2), crawl_date))
-                        computed += 1
+                        merged[seat] = round(total, 1)
+                if merged:
+                    p_conn.execute(
+                        "INSERT OR REPLACE INTO prices "
+                        "(from_station_id, to_station_id, train_num, seats, crawl_date) "
+                        "VALUES (?, ?, ?, ?, ?)",
+                        (f_id, t_id, train_num,
+                         json.dumps({database.SEAT_SHORT[k]: v for k, v in merged.items()
+                                     if k in database.SEAT_SHORT},
+                                    ensure_ascii=False, separators=(",", ":")),
+                         crawl_date))
+                    computed += 1
         p_conn.commit()
         if computed:
             print(f"  📐 已计算 {computed} 条非相邻段票价")
@@ -440,10 +460,7 @@ def main():
             n = conn.execute("SELECT COUNT(*) FROM prices").fetchone()[0]
             t = conn.execute("SELECT COUNT(DISTINCT train_num) FROM prices").fetchone()[0]
             d = conn.execute("SELECT MAX(crawl_date) FROM prices").fetchone()[0]
-            new = conn.execute(
-                "SELECT COUNT(*) FROM prices WHERE LENGTH(seat) > 6").fetchone()[0]
-            print(f"prices 共 {n} 条 / {t} 车 / 最新爬取日 {d}")
-            print(f"其中新口径（组合席别名）{new} 条")
+            print(f"prices 共 {n} 站对 / {t} 车 / 最新爬取日 {d}")
             print(f"数据库: {PRICES_DB}")
         finally:
             conn.close()

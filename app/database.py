@@ -42,6 +42,12 @@ SEAT_CN_TO_CLASS = {
     "一等座": "class1", "软座": "class1", "硬卧/二等卧": "class1", "动卧": "class1",
     "商务座/特等座": "class0", "高级软卧": "class0", "软卧/一等卧": "class0",
 }
+# 席别组合名 → 单字符短键（seats JSON 键；与 collect/database.py 的映射保持一致）
+SEAT_SHORT = {
+    "二等座/二等包座": "2", "一等座": "1", "商务座/特等座": "0",
+    "硬座": "h", "硬卧/二等卧": "y", "软卧/一等卧": "r", "动卧": "d",
+    "高级软卧": "g", "软座": "u", "无座": "w", "优选一等座": "p",
+}
 
 
 def get_railway_conn() -> sqlite3.Connection:
@@ -187,28 +193,38 @@ def get_station_trains(conn: sqlite3.Connection, station_id: str) -> Optional[Di
 
 def get_price_estimate(from_id: str, to_id: str, seat_cn: str) -> Optional[float]:
     """该区间实际席别的历史参考价（取最低价；无数据返回 None）。
-    seat_cn 为 12306 席别名（成员名或组合名均可，自动归一）。prices 表三种存储并存：
-    新组合名（collect.price_collector）/ 旧单名（早期版本）/ 旧 class 键（travel2），全兼容。"""
+    seat_cn 为 12306 席别名（成员名或组合名均可，自动归一）。
+    紧凑表形 v2：WITHOUT ROWID 主键(from,to,train)，一行一站对，seats JSON
+    键为单字符短键（SEAT_SHORT）；匹配席别档位（组合名/成员名）取 MIN。"""
     if not os.path.exists(PRICES_DB):
         return None
     cn = (seat_cn or "").strip()
     canonical = SEAT_CANONICAL.get(cn, cn)
-    seat_old = SEAT_CN_TO_CLASS.get(canonical)
-    if not canonical and not seat_old:
+    keys = set()
+    for name in (canonical, cn):
+        if name in SEAT_SHORT:
+            keys.add(SEAT_SHORT[name])
+        else:
+            for member, c in SEAT_CANONICAL.items():   # 同组单成员名 → 同短键
+                if c == canonical and member in SEAT_SHORT:
+                    keys.add(SEAT_SHORT[member])
+    if not keys:
         return None
-    names = [canonical]
-    for member, c in SEAT_CANONICAL.items():
-        if c == canonical and "/" not in member:
-            names.append(member)                     # 同组单成员名（早期单名存储）
-    if seat_old:
-        names.append(seat_old)
     conn = get_prices_conn()
     try:
-        ph = ",".join("?" * len(names))
-        row = conn.execute(
-            f"SELECT MIN(price) FROM prices WHERE from_station_id = ? AND to_station_id = ? "
-            f"AND seat IN ({ph})", [from_id, to_id] + names).fetchone()
-        return row[0] if row and row[0] else None
+        best = None
+        for (seats_json,) in conn.execute(
+                "SELECT seats FROM prices WHERE from_station_id = ? AND to_station_id = ?",
+                (from_id, to_id)):
+            try:
+                m = json.loads(seats_json)
+            except (ValueError, TypeError):
+                continue
+            for k in keys:
+                v = m.get(k)
+                if v is not None and (best is None or v < best):
+                    best = v
+        return best
     except sqlite3.Error:
         return None
     finally:
