@@ -283,16 +283,23 @@ class Collector12306:
                 continue          # 该日期不开行 → 试下一个候选日期
             name_to_code = self._get_station_map()
             stops = []
+            day = 0                      # 跨天推导：时刻回绕即 +1 天（同车经停时刻单调不减）
+            prev = None
             for item in items:
                 if not isinstance(item, dict):
                     continue
                 station_name = item.get("station_name", "")
                 depart_time = _norm_time(item.get("depart_time")) or _norm_time(item.get("start_time"))
+                if prev and depart_time and depart_time < prev:
+                    day += 1
+                if depart_time:
+                    prev = depart_time
                 stops.append({
                     "station_no": item.get("station_no", 0),
                     "station_id": name_to_code.get(station_name, ""),
                     "station_name": station_name,
                     "stop_time": depart_time,
+                    "day_offset": day,
                 })
             return stops
         return []
@@ -325,9 +332,9 @@ def fill_alias_stops() -> Dict[str, int]:
                 for s in rows:
                     conn.execute(
                         "INSERT OR REPLACE INTO train_stops "
-                        "(train_num, stop_no, station_id, station_name, stop_time) "
-                        "VALUES (?, ?, ?, ?, ?)",
-                        (code, s[0], s[1], s[2], s[3]))
+                        "(train_num, stop_no, station_id, station_name, stop_time, day_offset) "
+                        "VALUES (?, ?, ?, ?, ?, ?)",
+                        (code, s[0], s[1], s[2], s[3], s[4]))
                 filled += 1
                 codes_added += len(rows)
         conn.commit()
@@ -408,10 +415,10 @@ def collect_stops(collector: Collector12306, pending: List, groups: Dict[str, Li
                             for s in stops:
                                 conn.execute(
                                     "INSERT OR REPLACE INTO train_stops "
-                                    "(train_num, stop_no, station_id, station_name, stop_time) "
-                                    "VALUES (?, ?, ?, ?, ?)",
+                                    "(train_num, stop_no, station_id, station_name, stop_time, day_offset) "
+                                    "VALUES (?, ?, ?, ?, ?, ?)",
                                     (code, s["station_no"], s["station_id"],
-                                     s["station_name"], s["stop_time"]))
+                                     s["station_name"], s["stop_time"], s["day_offset"]))
                         conn.commit()
                         collected += 1
                         inserted += len(codes)

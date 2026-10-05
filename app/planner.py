@@ -23,6 +23,8 @@ from typing import Dict, List, Optional, Tuple
 from . import database as db
 
 TRANSFER_MIN_GAP = 20          # 换乘衔接最短分钟（travel2 同款）
+MAX_TRANSFER_WAIT_MIN = 1080   # 换乘等待上限（18 小时，防垃圾过夜方案）
+MAX_TRIP_MIN = 4320            # 单方案行程跨度上限（72 小时，覆盖最长车次+换乘）
 TRANSFER_MAX_FIRST = 400       # 第一程枚举上限（防超大站对全量爆炸）
 FRONTIER_CAP = 40              # 换乘链每层保留的路径数（防组合爆炸）
 MAX_TRANSFERS_LIMIT = 2        # 引擎支持的最多换乘次数
@@ -105,7 +107,8 @@ def _hmm_to_min(hhmm: str) -> int:
 # ------------------------------------------------------------
 
 def _make_segment(conn, train_num: str, from_id: str, to_id: str,
-                  depart: str, arrive: str, seat_type: str) -> Dict:
+                  depart: str, arrive: str, seat_type: str,
+                  dep_day: int = 0, arr_day: int = 0) -> Dict:
     return {
         "train_num": train_num,
         "train_no": db.get_train_no(conn, train_num),
@@ -113,7 +116,8 @@ def _make_segment(conn, train_num: str, from_id: str, to_id: str,
         "from_station_name": db.get_station_name(conn, from_id),
         "to_station_name": db.get_station_name(conn, to_id),
         "depart_time": depart, "arrive_time": arrive,
-        "duration": db.calc_duration(depart, arrive),
+        "depart_day": dep_day, "arrive_day": arr_day,
+        "duration": db.calc_duration(depart, arrive, dep_day, arr_day),
     }
 
 
@@ -136,12 +140,14 @@ def _direct_solutions(conn, from_id: str, to_id: str, seat_type: str,
         if tno:
             seen_tno.add(tno)
         seg = _make_segment(conn, r["train_num"], from_id, to_id,
-                            r["depart_time"], r["arrive_time"], seat_type)
+                            r["depart_time"], r["arrive_time"], seat_type,
+                            r["depart_day"], r["arrive_day"])
         out.append({
             "type": "direct", "transfer_count": 0,
             "depart_time": r["depart_time"], "arrive_time": r["arrive_time"],
             "total_duration": r["duration"], "segments": [seg],
             "transfer_waits": [],
+            "cross_days": r["arrive_day"] - r["depart_day"],
         })
     return out
 
@@ -166,7 +172,8 @@ def _transfer_solutions(conn, from_id: str, to_id: str, seat_type: str,
     # path = {"segs": [...], "dep_a", "arr_last", "last_id", "trains": set, "waits": []}
     frontier: List[Dict] = []
     first_rows = conn.execute("""
-        SELECT ta.train_num, ta.stop_time, tm.station_id, tm.station_name, tm.stop_time
+        SELECT ta.train_num, ta.stop_time, ta.day_offset,
+               tm.station_id, tm.station_name, tm.stop_time, tm.day_offset
         FROM train_stops ta
         JOIN train_stops tm ON tm.train_num = ta.train_num AND tm.stop_no > ta.stop_no
         WHERE ta.station_id = ?
@@ -177,22 +184,26 @@ def _transfer_solutions(conn, from_id: str, to_id: str, seat_type: str,
         LIMIT ?
     """, (from_id, to_id, TRANSFER_MAX_FIRST)).fetchall()
     seen_first = set()
-    for t1, dep_a, m_id, m_name, arr_m in first_rows:
+    for t1, dep_a, day_a, m_id, m_name, arr_m, day_m in first_rows:
         if _city_key(m_name) == dest_city:
             continue
         if not _in_window(dep_a, win.get("depart_after"), win.get("depart_before")):
             continue
-        total = db.time_diff_minutes(dep_a, arr_m)
-        if total < 0:
+        dep_abs = db.to_abs(day_a, dep_a)
+        arr_abs = db.to_abs(day_m, arr_m)
+        if dep_abs is None or arr_abs is None or arr_abs <= dep_abs:
+            continue
+        total = arr_abs - dep_abs
+        if total > MAX_TRIP_MIN:
             continue
         key = (t1, m_id)
         if key in seen_first:
             continue
         seen_first.add(key)
         frontier.append({
-            "segs": [(t1, from_id, m_id, dep_a, arr_m)],
-            "dep_a": dep_a, "arr_last": arr_m, "last_id": m_id,
-            "trains": {t1}, "waits": [], "total": total,
+            "segs": [(t1, from_id, m_id, dep_a, arr_m, day_a, day_m)],
+            "dep_a": dep_a, "dep_a_abs": dep_abs, "arr_abs": arr_abs,
+            "last_id": m_id, "trains": {t1}, "waits": [], "total": total,
         })
     if not frontier:
         return []
@@ -218,12 +229,12 @@ def _transfer_solutions(conn, from_id: str, to_id: str, seat_type: str,
         if not stops:
             break
 
-        # 从前沿站出发的下一程：(起点站, 车次, 发车, 下车站, 下车名, 到达)
+        # 从前沿站出发的下一程：(起点站, 车次, 发车, 发车日, 下车站, 下车名, 到达, 到达日)
         next_legs: Dict[str, List] = {}
         ph = ",".join("?" * len(stops))
         sql = f"""
-            SELECT um.station_id, um.train_num, um.stop_time,
-                   uv.station_id, uv.station_name, uv.stop_time
+            SELECT um.station_id, um.train_num, um.stop_time, um.day_offset,
+                   uv.station_id, uv.station_name, uv.stop_time, uv.day_offset
             FROM train_stops um
             JOIN train_stops uv ON uv.train_num = um.train_num AND uv.stop_no > um.stop_no
             WHERE um.station_id IN ({ph})
@@ -242,29 +253,45 @@ def _transfer_solutions(conn, from_id: str, to_id: str, seat_type: str,
             params.append(to_id)
         # 同组多码最小码先出：前沿名额不被重复码挤占，且去重结果稳定
         sql += " ORDER BY um.train_num, um.stop_time LIMIT 6000"
-        for f_id, t, dep_f, nxt_id, nxt_name, arr_n in conn.execute(sql, params).fetchall():
-            next_legs.setdefault(f_id, []).append((t, dep_f, nxt_id, nxt_name, arr_n))
+        for f_id, t, dep_f, day_f, nxt_id, nxt_name, arr_n, day_n in \
+                conn.execute(sql, params).fetchall():
+            next_legs.setdefault(f_id, []).append(
+                (t, dep_f, day_f, nxt_id, nxt_name, arr_n, day_n))
 
         new_frontier: List[Dict] = []
         for path in frontier:
             legs = next_legs.get(path["last_id"], [])
-            for t, dep_f, nxt_id, nxt_name, arr_n in legs:
+            for t, dep_f, day_f, nxt_id, nxt_name, arr_n, day_n in legs:
                 if t in path["trains"]:
                     continue                      # 同车不连续乘坐
                 if not is_last and _city_key(nxt_name) == dest_city:
                     continue                      # 非末段：中转站与目的地同城排除
-                gap = db.time_diff_minutes(path["arr_last"], dep_f)
-                if gap < TRANSFER_MIN_GAP:
+                # 跨天对齐：下一程基于自身时刻序列，找最小日偏移 δ 使
+                # 换乘间隔落在 [TRANSFER_MIN_GAP, MAX_TRANSFER_WAIT_MIN]
+                dep_rel = db.to_abs(day_f, dep_f)
+                arr_rel = db.to_abs(day_n, arr_n)
+                if dep_rel is None or arr_rel is None:
                     continue
-                dep_a = path["dep_a"]
-                total = db.time_diff_minutes(dep_a, arr_n)
-                if total < 0:
-                    continue                      # 跨天淘汰（当日完成约束）
+                base = gap = None
+                for delta in range(4):
+                    cand = dep_rel + delta * 1440
+                    g = cand - path["arr_abs"]
+                    if TRANSFER_MIN_GAP <= g <= MAX_TRANSFER_WAIT_MIN:
+                        base, gap = cand, g
+                        break
+                if base is None:
+                    continue
+                arr_abs = base + (arr_rel - dep_rel)   # 下一程到达（对齐后绝对分钟）
+                total = arr_abs - path["dep_a_abs"]
+                if total > MAX_TRIP_MIN:
+                    continue                    # 行程跨度上限（不再淘汰隔天方案）
                 if not _in_window(arr_n, win.get("arrive_after"), win.get("arrive_before")):
                     continue
                 new_frontier.append({
-                    "segs": path["segs"] + [(t, path["last_id"], nxt_id, dep_f, arr_n)],
-                    "dep_a": dep_a, "arr_last": arr_n, "last_id": nxt_id,
+                    "segs": path["segs"] + [(t, path["last_id"], nxt_id, dep_f, arr_n,
+                                             base // 1440, arr_abs // 1440)],
+                    "dep_a": path["dep_a"], "dep_a_abs": path["dep_a_abs"],
+                    "arr_abs": arr_abs, "last_id": nxt_id,
                     "trains": path["trains"] | {t},
                     "waits": path["waits"] + [gap],
                     "total": total,
@@ -282,14 +309,15 @@ def _transfer_solutions(conn, from_id: str, to_id: str, seat_type: str,
     completed = completed[:max(1, int(quota))]
     out = []
     for p in completed:
-        segs = [_make_segment(conn, t, f, tt, d, a, seat_type)
-                for t, f, tt, d, a in p["segs"]]
+        segs = [_make_segment(conn, t, f, tt, d, a, seat_type, dd, da)
+                for t, f, tt, d, a, dd, da in p["segs"]]
         transfer_stations = [db.get_station_name(conn, p["segs"][i][2])
                              for i in range(1, len(p["segs"]))]
         out.append({
             "type": "transfer", "transfer_count": len(p["waits"]),
-            "depart_time": p["dep_a"], "arrive_time": p["arr_last"],
+            "depart_time": p["dep_a"], "arrive_time": p["segs"][-1][4],
             "total_duration": f"{p['total'] // 60:02d}:{p['total'] % 60:02d}",
+            "cross_days": p["segs"][-1][6] - p["segs"][0][5],
             "transfer_waits": p["waits"],
             "transfer_station": "、".join(transfer_stations),
             "segments": segs,
@@ -437,10 +465,9 @@ def plan_solutions(conn: sqlite3.Connection, from_id: str, to_id: str, *,
     for s in sols:
         s["price_est"] = _price_estimate(conn, s, seat_type,
                                          fallback_seat=seat_fallback)
-        try:
-            s["cross_midnight"] = s["arrive_time"] < s["depart_time"]
-        except Exception:
-            s["cross_midnight"] = False
+        if "cross_days" not in s:
+            s["cross_days"] = 0
+        s["cross_midnight"] = s["cross_days"] > 0
     if sort_by == "comprehensive":
         score_solutions(sols)                      # 直接比较排序的模式不评分
 

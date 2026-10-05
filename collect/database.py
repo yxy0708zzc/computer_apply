@@ -39,6 +39,7 @@ CREATE TABLE IF NOT EXISTS train_stops (
     station_id TEXT NOT NULL,
     station_name TEXT NOT NULL,
     stop_time TEXT NOT NULL,
+    day_offset INTEGER NOT NULL DEFAULT 0,
     FOREIGN KEY (train_num) REFERENCES trains(train_num) ON UPDATE CASCADE,
     FOREIGN KEY (station_id) REFERENCES stations(station_id) ON UPDATE CASCADE,
     UNIQUE(train_num, stop_no)

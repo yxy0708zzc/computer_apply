@@ -309,6 +309,7 @@ label input, label select { margin-top: 5px; }
 .sr-dur, .sr-price { font-weight: 600; }
 .sr-price { color: var(--gold); }
 .sr-l2 { font-size: 13px; line-height: 1.7; color: var(--ink); margin-bottom: 6px; }
+.sr-l2 .cross-d { color: var(--red-d); font-size: 11.5px; }
 .sr-l2 .tn { font-weight: 700; color: var(--red-d); }
 .sr-l2 .tm { color: var(--ink3); }
 .sr-l2 .arr { color: var(--gold-soft); padding: 0 4px; }

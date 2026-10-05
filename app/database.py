@@ -68,11 +68,12 @@ def get_prices_conn() -> sqlite3.Connection:
 # ------------------------------------------------------------
 
 def get_train_stops(conn: sqlite3.Connection, train_num: str) -> List[Dict]:
-    """车次经停站（stop_no 升序）：[{stop_no, station_id, station_name, stop_time}]"""
+    """车次经停站（stop_no 升序）：[{stop_no, station_id, station_name, stop_time, day_offset}]"""
     rows = conn.execute(
-        "SELECT stop_no, station_id, station_name, stop_time FROM train_stops "
+        "SELECT stop_no, station_id, station_name, stop_time, day_offset FROM train_stops "
         "WHERE train_num = ? ORDER BY stop_no", (train_num,)).fetchall()
-    return [dict(zip(("stop_no", "station_id", "station_name", "stop_time"), tuple(r)))
+    return [dict(zip(("stop_no", "station_id", "station_name", "stop_time", "day_offset"),
+                     tuple(r)))
             for r in rows]
 
 
@@ -83,29 +84,46 @@ def get_train_no(conn: sqlite3.Connection, train_num: str) -> Optional[str]:
 
 
 def get_routes_between(conn: sqlite3.Connection, from_id: str, to_id: str) -> List[Dict]:
-    """同车经过 from→to（顺序正确）的直达车：[{train_num, depart_time, arrive_time, duration}]"""
+    """同车经过 from→to（顺序正确）的直达车：[{train_num, depart_time, arrive_time,
+    duration, depart_day, arrive_day}]。duration 按 day_offset 精确（跨天 >24:00）。
+    按 train_num 排序：改号车同组多码时最小码先出（配合 _sig 按 train_no 去重保留它）。"""
     rows = conn.execute("""
-        SELECT s1.train_num, s1.stop_time, s2.stop_time
+        SELECT s1.train_num, s1.stop_time, s2.stop_time, s1.day_offset, s2.day_offset
         FROM train_stops s1
         JOIN train_stops s2 ON s1.train_num = s2.train_num
         WHERE s1.station_id = ? AND s2.station_id = ? AND s1.stop_no < s2.stop_no
-        ORDER BY s1.stop_time
+        ORDER BY s1.train_num, s1.stop_time
     """, (from_id, to_id)).fetchall()
     return [{"train_num": tn, "depart_time": d, "arrive_time": a,
-             "duration": calc_duration(d, a)} for tn, d, a in rows]
+             "depart_day": dd, "arrive_day": da,
+             "duration": calc_duration(d, a, dd, da)}
+            for tn, d, a, dd, da in rows]
 
 
-def calc_duration(depart: str, arrive: str) -> str:
-    """HH:MM 差值；负数循环 +1440（跨天）；解析失败返回 --:--"""
+def to_abs(day: int, hhmm: str) -> Optional[int]:
+    """(第几日, HH:MM) → 绝对分钟（跨天统一坐标）；非法返回 None"""
+    m = hhmm_minutes(hhmm)
+    return None if m is None else day * 1440 + m
+
+
+def hhmm_minutes(hhmm: str) -> Optional[int]:
+    """HH:MM → 当日分钟；解析失败返回 None"""
     try:
-        h1, m1 = map(int, depart.split(":"))
-        h2, m2 = map(int, arrive.split(":"))
-        mins = (h2 * 60 + m2) - (h1 * 60 + m1)
-        while mins < 0:
-            mins += 1440
-        return f"{mins // 60:02d}:{mins % 60:02d}"
-    except (ValueError, AttributeError):
+        h, m = hhmm.split(":")
+        return int(h) * 60 + int(m)
+    except (ValueError, AttributeError, TypeError):
+        return None
+
+
+def calc_duration(depart: str, arrive: str, dep_day: int = 0, arr_day: int = 0) -> str:
+    """跨天精确历时：绝对分钟差（day_offset 支持 >24:00）；解析失败返回 --:--"""
+    d1, d2 = hhmm_minutes(depart), hhmm_minutes(arrive)
+    if d1 is None or d2 is None:
         return "--:--"
+    total = (arr_day * 1440 + d2) - (dep_day * 1440 + d1)
+    if total < 0:
+        total += 1440            # 无 day 信息时退回旧口径（同日回绕）
+    return f"{total // 60:02d}:{total % 60:02d}"
 
 
 def time_diff_minutes(t1: str, t2: str) -> int:

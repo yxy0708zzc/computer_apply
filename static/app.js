@@ -634,8 +634,12 @@
     const segs = s.segments || [];
     const trains = segs.map(g =>
       `<b class="tn">${esc(g.train_num)}</b> ${esc(g.from_station_name)}→${esc(g.to_station_name)}` +
-      ` <span class="tm">${esc(g.depart_time)}–${esc(g.arrive_time)}</span>`).join('<span class="arr"> ⇒ </span>');
+      ` <span class="tm">${esc(g.depart_time)}–${esc(g.arrive_time)}` +
+      (g.arrive_day > g.depart_day ? ` <b class="cross-d">+${g.arrive_day - g.depart_day}天</b>` : "") +
+      `</span>`).join('<span class="arr"> ⇒ </span>');
     const dur = s.total_duration || "--:--";
+    const cross = s.cross_days > 0
+      ? `<span class="tag variant">跨${s.cross_days}天</span>` : "";
     const score = s.score != null ? `<span class="score" title="综合评分">评分 ${s.score}</span>` : "";
     const price = s.checked
       ? (segs.filter(g => g.price != null).map(g => `¥${g.price}`).join(" + ") || "--")
@@ -652,7 +656,7 @@
     } else if (s.price_est != null) {
       seatInfo = `<span class="seat-chip">历史参考 ¥${s.price_est}</span>`;
     }
-    return { trains, dur, score, price, seatInfo };
+    return { trains, dur, score, price, seatInfo, cross };
   }
 
   function buildSolRow(s, container, checkHandler) {
@@ -662,7 +666,7 @@
     row.innerHTML =
       `<div class="sr-main">` +
       `<div class="sr-l1"><span class="sol-id">${esc(s.solution_id || "")}</span>${typeTag(s)}${stateTag(s)}` +
-      `<span class="sr-date">${esc(s.date || "")}</span>${m.score}` +
+      `<span class="sr-date">${esc(s.date || "")}</span>${m.cross}${m.score}` +
       `<span class="sr-dur">历时 ${esc(m.dur)}</span><span class="sr-price">票价 ${m.price}</span></div>` +
       `<div class="sr-l2">${m.trains}</div>` +
       `<div class="sr-l3">${m.seatInfo || ""}` +
