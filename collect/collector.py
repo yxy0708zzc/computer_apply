@@ -43,9 +43,9 @@ from database import get_conn, init_db, refresh_station_trains, stats   # noqa: 
 CONFIG = {
     "query_date": (datetime.now() + timedelta(days=3)).strftime("%Y-%m-%d"),
     # 经停查询候选日期：车次非每日开行，某日无数据则逐日重试。
-    # 今天/明天命中率最高（当前运行图有效），再加 +3/+9/+13 覆盖非每日车。
+    # 今天/明天命中率最高（当前运行图有效），再加 +5/+6 覆盖非每日车。
     "query_dates": [(datetime.now() + timedelta(days=d)).strftime("%Y-%m-%d")
-                    for d in (0, 1, 2, 3, 9, 13)],
+                    for d in (0, 1, 5, 6)],
     "min_interval": 0.15,            # 请求最小间隔（秒），travel2 同款（固定值）
     "request_timeout": 15,
     "max_retries": 10,
@@ -463,9 +463,13 @@ def main():
     init_db()
     collector = Collector12306()
     collector._session()
-    print(f"[采集] 发现车次（字头: {' '.join(args.letters)}"
-          f"{' + 数字' if args.digit else ''}）...")
-    discovered = collector.discover_trains(letters=args.letters, digit=args.digit)
+    # 数字组要求 letters 含空串（discover_trains 内部约定）；digit 开启时自动拼入
+    letters = list(args.letters)
+    if args.digit and "" not in letters:
+        letters.append("")
+    print(f"[采集] 发现车次（字头: {' '.join(x if x else '数字' for x in letters)}"
+          f"）...")
+    discovered = collector.discover_trains(letters=letters, digit=args.digit)
     print(f"[采集] 共发现 {len(discovered)} 个车次")
 
     conn = get_conn()

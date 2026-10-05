@@ -434,7 +434,7 @@ def api_manual_search(body: ManualSearchIn):
         # "不限"席：估价用二等座档（缺失回落硬座）；核实时由 online 按"不限"取任一可购席
         est_seat = "二等座" if body.seat_type == "不限" else body.seat_type
         seat_fb = "硬座" if est_seat == "二等座" else None
-        n = max(1, min(int(body.max_results), 60))
+        n = max(1, min(int(body.max_results), 200))
 
         def _plan(f_v, t_v, enum_total):
             return planner.plan_solutions(
@@ -457,22 +457,22 @@ def api_manual_search(body: ManualSearchIn):
         if body.fuzzy:
             def _expand(kw):
                 # 中文站名一律展开所有含该词的站（含精确站自身，如"北京"含北京西/南/丰台…）；
-                # 电报码（ASCII）走精确单站
+                # 电报码（ASCII）走精确单站。北京同城多站达 9 个，上限给足
                 if kw.isascii():
                     v = db.resolve_station_exact(conn, kw)
                     return [v] if v else []
-                cands = [c["station_id"] for c in db.search_stations(conn, kw, limit=8)]
+                cands = [c["station_id"] for c in db.search_stations(conn, kw, limit=12)]
                 v = db.resolve_station_exact(conn, kw)
                 if v and v not in cands:
                     cands.insert(0, v)
-                return cands[:8]
+                return cands[:12]
 
             from_c = _expand((body.from_station or "").strip())
             to_c = _expand((body.to_station or "").strip())
             if not from_c or not to_c:
                 bad = body.from_station if not from_c else body.to_station
                 raise HTTPException(400, f"无法识别车站: {bad}")
-            pairs = [(f, t) for f in from_c for t in to_c][:40]   # 组合上限
+            pairs = [(f, t) for f in from_c for t in to_c][:60]   # 组合上限（9×5 类同城展开可全量纳入）
             per_enum = max(40, n * 4)                             # 每对候选池
             all_sols, seen = [], set()
             for f_v, t_v in pairs:

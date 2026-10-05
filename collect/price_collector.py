@@ -49,7 +49,7 @@ from cleanup import cleanup_incomplete   # noqa: E402
 CONFIG = {
     # 候选日期：票价列表按日期返回当日开行车次，非每日车须逐日兜底（今天命中率最高）
     "query_dates": [(datetime.now() + timedelta(days=d)).strftime("%Y-%m-%d")
-                    for d in (0, 1, 2, 3, 9, 13)],
+                    for d in (0, 1, 5, 6)],
     "request_timeout": 15,
     "max_retries": 5,
     "min_interval": 0.02,            # 全局共享间隔（RateLimiter 口径，所有线程合计）

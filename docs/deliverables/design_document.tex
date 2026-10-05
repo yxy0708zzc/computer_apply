@@ -21,6 +21,7 @@
 
 \setlist{nosep}
 \renewcommand{\arraystretch}{1.32}
+\emergencystretch=3em   % 允许中英混排断行弹性，消除长英文词导致的 Overfull
 
 \newcommand{\sectionline}{\par\vspace{0.2em}\noindent\rule{\linewidth}{0.4pt}\par}
 \newcommand{\cnsection}[1]{%
@@ -124,7 +125,9 @@
 \subsectioncn{（2）可行性分析}
 
 \minisubsection{技术可行性}
-后端采用Python 3和FastAPI，数据处理使用SQLite，前端使用原生HTML/CSS/JavaScript，服务端事件（SSE）承担流式输出。12306公开查询接口可核实余票和票价，OpenAI兼容接口可接入不同大模型。当前本地库包含3404个车站、16076趟车次、162943条经停记录和约279万条历史票价记录，具备支撑全路网方案枚举的数据基础。
+\begin{sloppypar}
+后端采用Python 3和FastAPI，数据处理使用SQLite，前端使用原生HTML、CSS与JavaScript，服务端事件（SSE）承担流式输出。12306公开查询接口可核实余票和票价，OpenAI兼容接口可接入不同大模型。当前本地库包含3404个车站、16076趟车次、162943条经停记录和约279万条历史票价记录，具备支撑全路网方案枚举的数据基础。
+\end{sloppypar}
 
 \minisubsection{操作可行性}
 用户无需注册登录。首次使用只需配置API-KEY、模型名称和接口地址；日常使用可双击启动脚本，浏览器自动打开本地服务。AI模式适合自然语言提问，手动模式提供表单筛选，两类用户均能低门槛上手。
@@ -142,7 +145,7 @@
 \subsectioncn{（1）功能概述}
 系统面向两类角色：出行旅客（核心服务对象）与数据维护者（采集与运维）。功能需求编号F1～F7如下：
 
-\begin{longtable}{|p{0.9cm}|p{2.6cm}|p{9.7cm}|p{1.3cm}|}
+\begin{longtable}{|p{0.9cm}|p{2.6cm}|p{9.6cm}|p{1.3cm}|}
 \hline
 \textbf{编号} & \textbf{功能} & \textbf{说明} & \textbf{优先级} \\ \hline
 F1 & AI对话规划 & 用户用自然语言提出需求；系统展示思考流和工具调用轨迹，流式生成正式规划报告与方案总表，支持连续追问和多轮调整。 & 高 \\ \hline
@@ -243,7 +246,7 @@ AI视图左侧可新建会话；右键会话可重命名或删除。切换历史
 
 \cnsectionflow{五、团队介绍和人员分工}
 
-\begin{longtable}{|p{3cm}|p{14cm}|}
+\begin{longtable}{|p{3cm}|p{12.2cm}|}
 \hline
 \textbf{成员} & \textbf{分工} \\ \hline
 张泽昌 & 需求分析、总体架构、AI Agent设计、规划引擎联调、文档统稿。 \\ \hline
@@ -262,16 +265,16 @@ AI视图左侧可新建会话；右键会话可重命名或删除。切换历史
 
 开发过程中仅以标准依赖包形式引用以下公开发布的开源软件（均通过pip或CDN直接获取，未改动其源码），按要求标明如下：
 
-\begin{longtable}{|p{3.4cm}|p{3.2cm}|p{2.8cm}|p{5.8cm}|}
+\begin{longtable}{|>{\raggedright\arraybackslash}p{2.6cm}|>{\raggedright\arraybackslash}p{3.7cm}|>{\raggedright\arraybackslash}p{2.2cm}|>{\raggedright\arraybackslash}p{5.1cm}|}
 \hline
 \textbf{组件} & \textbf{许可证} & \textbf{引入方式} & \textbf{用途} \\ \hline
 FastAPI & BSD-3-Clause & pip 依赖 & Web 服务框架与接口定义 \\ \hline
 Uvicorn & BSD-3-Clause & pip 依赖 & ASGI 服务器 \\ \hline
 Requests & Apache-2.0 & pip 依赖 & HTTP 客户端（12306 接口调用） \\ \hline
 Pydantic & MIT & pip 依赖 & 数据模型与参数校验 \\ \hline
-SQLite & Public Domain & Python 标准库 sqlite3 & 本地数据存储 \\ \hline
+SQLite & Public Domain & 标准库 & 本地数据存储 \\ \hline
 marked.js & MIT & CDN 引入 & 前端 Markdown 渲染 \\ \hline
-DOMPurify & Apache-2.0 / MPL-2.0 & CDN 引入 & 前端输出净化（防 XSS） \\ \hline
+DOMPurify & Apache-2.0, MPL-2.0 & CDN 引入 & 前端输出净化（防XSS） \\ \hline
 \end{longtable}
 
 此外，系统调用的12306公开查询接口与OpenAI兼容的大模型接口均为网络服务协议，不涉及开源代码引用；本文档使用LaTeX（TeX Live 发行版）排版。
